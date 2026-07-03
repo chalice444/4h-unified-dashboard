@@ -1258,16 +1258,59 @@ function SubTabs({ tabs, active, onChange }) {
   );
 }
 
-const NAV_ITEMS = [
-  { key: "dashboard", label: "ダッシュボード", icon: LayoutDashboard },
-  { key: "entry", label: "データ入力", icon: Upload },
-  { key: "monthlyReport", label: "月次レポート", icon: FileText },
-  { key: "cancellation", label: "退会分析", icon: UserMinus },
-  { key: "cvr", label: "CVR分析", icon: BarChart3 },
-  { key: "marketing", label: "マーケティング分析", icon: Target },
-  { key: "compare", label: "予実・前年比", icon: TrendingUp },
-  { key: "settings", label: "設定", icon: SettingsIcon },
+const NAV_SECTIONS = [
+  {
+    label: "KPI管理",
+    items: [
+      { key: "dashboard", label: "ダッシュボード", icon: LayoutDashboard },
+      { key: "monthlyReport", label: "月次レポート", icon: FileText },
+      { key: "compare", label: "予実・前年比", icon: TrendingUp },
+    ],
+  },
+  {
+    label: "分析",
+    items: [
+      { key: "cvr", label: "CVR分析", icon: BarChart3 },
+      { key: "cancellation", label: "退会分析", icon: UserMinus },
+      { key: "marketing", label: "マーケティング分析", icon: Target },
+    ],
+  },
+  {
+    label: "データ管理",
+    items: [
+      { key: "entry", label: "データ入力", icon: Upload },
+    ],
+  },
+  {
+    label: "設定",
+    items: [
+      { key: "settings", label: "設定", icon: SettingsIcon },
+    ],
+  },
 ];
+const NAV_ITEMS = NAV_SECTIONS.flatMap((section) => section.items);
+
+function NavSections({ active, onChange }) {
+  return (
+    <>
+      {NAV_SECTIONS.map((section) => (
+        <div key={section.label} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          <div style={{
+            padding: "10px 12px 4px", fontSize: 10.5, fontWeight: 800, color: "var(--ink-faint)",
+            letterSpacing: ".06em",
+          }}>
+            {section.label}
+          </div>
+          {section.items.map((item) => (
+            <button key={item.key} onClick={() => onChange(item.key)} className={`f4h-navlink f4h-focus ${active === item.key ? "active" : ""}`}>
+              <item.icon size={16} /> {item.label}
+            </button>
+          ))}
+        </div>
+      ))}
+    </>
+  );
+}
 
 function NavRail({ active, onChange, mobileOpen, setMobileOpen }) {
   return (
@@ -1280,12 +1323,8 @@ function NavRail({ active, onChange, mobileOpen, setMobileOpen }) {
           <div style={{ width: 30, height: 30, borderRadius: 8, background: "var(--ink)", color: "white", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "var(--font-display)", fontWeight: 700, fontSize: 13 }}>4H</div>
           <div style={{ fontFamily: "var(--font-display)", fontWeight: 700, fontSize: 14.5, lineHeight: 1.15 }}>4H fitness<br /><span style={{ fontWeight: 500, fontSize: 11, color: "var(--ink-faint)" }}>総合ダッシュボード</span></div>
         </div>
-        <nav style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-          {NAV_ITEMS.map((item) => (
-            <button key={item.key} onClick={() => onChange(item.key)} className={`f4h-navlink f4h-focus ${active === item.key ? "active" : ""}`}>
-              <item.icon size={16} /> {item.label}
-            </button>
-          ))}
+        <nav style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <NavSections active={active} onChange={onChange} />
         </nav>
         <div style={{ marginTop: "auto", padding: "10px 8px", fontSize: 10.5, color: "var(--ink-faint)", lineHeight: 1.5 }}>
           梅ヶ丘・狛江 共通データ<br />全スタッフで共有されます
@@ -1299,12 +1338,8 @@ function NavRail({ active, onChange, mobileOpen, setMobileOpen }) {
               <div style={{ fontFamily: "var(--font-display)", fontWeight: 700 }}>4H fitness</div>
               <button onClick={() => setMobileOpen(false)} className="f4h-btn f4h-btn-ghost f4h-focus" style={{ padding: 6 }}><X size={18} /></button>
             </div>
-            <nav style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-              {NAV_ITEMS.map((item) => (
-                <button key={item.key} onClick={() => { onChange(item.key); setMobileOpen(false); }} className={`f4h-navlink f4h-focus ${active === item.key ? "active" : ""}`}>
-                  <item.icon size={16} /> {item.label}
-                </button>
-              ))}
+            <nav style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <NavSections active={active} onChange={(key) => { onChange(key); setMobileOpen(false); }} />
             </nav>
           </div>
         </div>
