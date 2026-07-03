@@ -900,7 +900,12 @@ async function sGet(key) {
   try {
     const r = await withTimeout(window.storage.get(key, true), 8000, "get:" + key);
     return r ? JSON.parse(r.value) : null;
-  } catch (e) { return null; }
+  } catch (e) {
+    if (new URLSearchParams(window.location.search).get("debugStorage") === "1") {
+      console.warn("[storage] sGet failed", key, e);
+    }
+    return null;
+  }
 }
 async function sSet(key, value) {
   try {
