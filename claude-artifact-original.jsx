@@ -5073,7 +5073,7 @@ function CancelMemberCounselingProgressSection({ data }) {
   );
 }
 
-function CounselingAnalysisView({ data, updateData, showToast }) {
+function CounselingAnalysisView({ data, updateData, showToast, onNavigate }) {
   const [csvText, setCsvText] = useState("");
   const [preview, setPreview] = useState(null);
   const [fileName, setFileName] = useState("");
@@ -5158,11 +5158,45 @@ function CounselingAnalysisView({ data, updateData, showToast }) {
   const StatLine = ({ label, value }) => (
     <span>{label} <b className="num">{value}</b></span>
   );
+  const activeMembers = normalizeCounselingActiveMembers(data.counselingActiveMembers);
+  const activeMembersMeta = normalizeCounselingActiveMembersMeta(data.counselingActiveMembers);
+  const newMembers = normalizeCounselingNewMembers(data.counselingNewMembers);
+  const newMembersMeta = normalizeCounselingNewMembersMeta(data.counselingNewMembers);
+  const cancelMembers = normalizeCounselingCancelMembers(data.counselingCancelMembers);
+  const cancelMembersMeta = normalizeCounselingCancelMembersMeta(data.counselingCancelMembers);
+  const metaTime = (value) => value ? new Date(value).toLocaleString("ja-JP") : "—";
 
   return (
     <div className="f4h-fade-in" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <SectionHeading eyebrow="カウンセリング分析" title="予約一覧CSVの取込・保存状況" />
+      <SectionHeading eyebrow="カウンセリング分析" title="カウンセリング分析" />
 
+      <div className="f4h-card" style={{ padding: 18 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 6 }}>保存状況</div>
+            <p style={{ fontSize: 12.5, color: "var(--ink-faint)", margin: 0, lineHeight: 1.7 }}>
+              カウンセリング分析用CSVの取込は「データ入力」タブの「カウンセリング分析用データ」から行ってください。
+            </p>
+          </div>
+          <button type="button" className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "8px 14px" }} onClick={() => onNavigate?.("entry")}>
+            データ入力へ移動
+          </button>
+        </div>
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 12.5, color: "var(--ink-soft)", marginTop: 14 }}>
+          <CounselingStatLine label="予約データ" value={`${reservations.length}件`} />
+          <CounselingStatLine label="在籍者データ" value={`${activeMembers.length}件`} />
+          <CounselingStatLine label="新規入会者データ" value={`${newMembers.length}件`} />
+          <CounselingStatLine label="退会者データ" value={`${cancelMembers.length}件`} />
+        </div>
+        <div style={{ marginTop: 8, display: "flex", gap: 14, flexWrap: "wrap", fontSize: 12, color: "var(--ink-faint)" }}>
+          <span>予約 最終取込: {metaTime(meta.importedAt)}</span>
+          <span>在籍者 最終取込: {metaTime(activeMembersMeta.importedAt)}</span>
+          <span>新規入会者 最終取込: {metaTime(newMembersMeta.importedAt || newMembersMeta.lastImportedAt)}</span>
+          <span>退会者 最終取込: {metaTime(cancelMembersMeta.importedAt || cancelMembersMeta.lastImportedAt)}</span>
+        </div>
+      </div>
+
+      <div style={{ display: "none" }} aria-hidden="true">
       <CounselingCollapsibleSection
         title="予約一覧CSV取込"
         sub="固定枠・自由枠の予約一覧CSVを取り込み、カウンセリング予約として保存します"
@@ -5300,6 +5334,7 @@ function CounselingAnalysisView({ data, updateData, showToast }) {
       >
         <CancelMemberImportPanel data={data} updateData={updateData} showToast={showToast} />
       </CounselingCollapsibleSection>
+      </div>
 
       <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
@@ -5912,7 +5947,7 @@ export default function App() {
           {nav === "entry" && <DataEntryView data={data} updateData={updateData} showToast={showToast} />}
           {nav === "monthlyReport" && <MonthlyReportView data={data} />}
           {nav === "cancellation" && <CancellationAnalysisView data={data} />}
-          {nav === "counseling" && <CounselingAnalysisView data={data} updateData={updateData} showToast={showToast} />}
+          {nav === "counseling" && <CounselingAnalysisView data={data} updateData={updateData} showToast={showToast} onNavigate={setNav} />}
           {nav === "cvr" && <CvrAnalysisView data={data} />}
           {nav === "marketing" && (
             <React.Suspense fallback={<div style={{ padding: 24, color: "var(--ink-faint)" }}>読み込み中...</div>}>
