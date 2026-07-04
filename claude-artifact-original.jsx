@@ -790,6 +790,24 @@ function normalizeCounselingActiveMembersMeta(value) {
     duplicateMemberIdCount: 0,
   };
 }
+function normalizeCounselingNewMembers(value) {
+  if (Array.isArray(value)) return value;
+  if (Array.isArray(value?.rows)) return value.rows;
+  return [];
+}
+function normalizeCounselingNewMembersMeta(value) {
+  if (value && typeof value === "object" && !Array.isArray(value) && value.meta) return value.meta;
+  return {
+    importedAt: null,
+    filename: null,
+    rowCount: 0,
+    validCount: 0,
+    excludedCount: 0,
+    blankMemberIdCount: 0,
+    duplicateMemberIdCount: 0,
+    unknownStartDateCount: 0,
+  };
+}
 function parseCounselingActiveMembers(rawRows) {
   const map = new Map();
   const stats = {
@@ -830,6 +848,53 @@ function parseCounselingActiveMembers(rawRows) {
       statusCategory: cancellationRequestDate ? "退会予定" : "契約中",
     };
     map.set(memberId, activeMember);
+  }
+  const rows = [...map.values()];
+  stats.validCount = rows.length;
+  stats.excludedCount = stats.rowCount - stats.validCount;
+  return { rows, stats };
+}
+function parseCounselingNewMembers(rawRows) {
+  const map = new Map();
+  const stats = {
+    rowCount: rawRows.length,
+    validCount: 0,
+    excludedCount: 0,
+    blankMemberIdCount: 0,
+    duplicateMemberIdCount: 0,
+    unknownStartDateCount: 0,
+  };
+  for (const row of rawRows) {
+    const memberId = normalizeMemberId(activeMemberRowValue(row, ["メンバーID", "メンバー ID", "メンバーＩＤ", "会員ID", "メンバー_ID", "会員番号", "memberId", "member_id"]));
+    if (!memberId) {
+      stats.blankMemberIdCount += 1;
+      continue;
+    }
+    if (map.has(memberId)) {
+      stats.duplicateMemberIdCount += 1;
+      console.warn("[counseling] duplicate new member id; later row wins", memberId);
+    }
+    const storeRaw = String(activeMemberRowValue(row, ["所属店舗名"], { exact: true }) || "").trim();
+    const joinDate = parseCounselingDate(activeMemberRowValue(row, ["入会日時"]));
+    const planStartDate = parseCounselingDate(activeMemberRowValue(row, ["プラン契約適用開始日"]));
+    const startDate = planStartDate || joinDate;
+    if (!startDate) stats.unknownStartDateCount += 1;
+    const newMember = {
+      memberId,
+      name: String(activeMemberRowValue(row, ["氏名", "名前", "会員名", "メンバー名"]) || "").trim(),
+      gender: String(activeMemberRowValue(row, ["性別"]) || "").trim(),
+      age: Number(activeMemberRowValue(row, ["年齢"])) || null,
+      belongingStoreName: storeRaw,
+      store: matchStoreName(storeRaw) || storeRaw,
+      joinDate,
+      planStartDate,
+      startDate,
+      startMonth: monthOfIsoDate(startDate),
+      planName: String(activeMemberRowValue(row, ["契約プラン名", "プラン名"]) || "").trim(),
+      planContractDate: parseCounselingDate(activeMemberRowValue(row, ["プラン契約日"])),
+      planEndDate: parseCounselingDate(activeMemberRowValue(row, ["プラン契約適用終了日"])),
+    };
+    map.set(memberId, newMember);
   }
   const rows = [...map.values()];
   stats.validCount = rows.length;
@@ -908,6 +973,48 @@ function buildActiveCounselingProgress(activeMembersValue, reservationsValue) {
     (a.checkedStage - b.checkedStage) ||
     String(a.startDate || "9999-99-99").localeCompare(String(b.startDate || "9999-99-99")) ||
     (a.statusCategory === "退会予定" ? -1 : b.statusCategory === "退会予定" ? 1 : 0) ||
+    String(a.memberId).localeCompare(String(b.memberId))
+  ));
+}
+function buildNewMemberCounselingProgress(newMembersValue, reservationsValue) {
+  const reservationsByMember = new Map();
+  for (const r of normalizeCounselingReservations(reservationsValue)) {
+    if (!r?.memberId || !isCounselingTicket(r.ticket)) continue;
+    if (!reservationsByMember.has(r.memberId)) reservationsByMember.set(r.memberId, []);
+    reservationsByMember.get(r.memberId).push(r);
+  }
+  return normalizeCounselingNewMembers(newMembersValue).map((member) => {
+    const memberReservations = reservationsByMember.get(member.memberId) || [];
+    const checkedIn = memberReservations.filter((r) => counselingStatusIsCheckedIn(r.reservationStatus));
+    const reservedIncluded = memberReservations.filter((r) => counselingStatusIsReserved(r.reservationStatus));
+    const checkedStage = Math.max(0, ...checkedIn.map((r) => counselingTicketStage(r.ticket)));
+    const reservedStage = Math.max(0, ...reservedIncluded.map((r) => counselingTicketStage(r.ticket)));
+    const checkedByStage = {};
+    for (const r of checkedIn) {
+      const stage = counselingTicketStage(r.ticket);
+      if (!stage) continue;
+      const key = Math.min(stage, 4);
+      const current = checkedByStage[key];
+      if (!current || String(r.lessonDate || "").localeCompare(String(current.lessonDate || "")) > 0) checkedByStage[key] = r;
+    }
+    const latest = latestCounselingRow(checkedIn);
+    return {
+      ...member,
+      checkedStage,
+      reservedStage,
+      finalCounselingDate: latest?.lessonDate || null,
+      nextCounseling: nextCounselingName(checkedStage),
+      firstCounselingDate: checkedByStage[1]?.lessonDate || null,
+      secondCounselingDate: checkedByStage[2]?.lessonDate || null,
+      thirdCounselingDate: checkedByStage[3]?.lessonDate || null,
+      fourthPlusCounselingDate: checkedByStage[4]?.lessonDate || null,
+      finalCounselingName: latest?.ticket || "",
+      finalCounselingStartTime: latest?.startTime || "",
+      finalCounselingStaffName: latest?.staffName || "",
+    };
+  }).sort((a, b) => (
+    (a.checkedStage - b.checkedStage) ||
+    String(a.startDate || "9999-99-99").localeCompare(String(b.startDate || "9999-99-99")) ||
     String(a.memberId).localeCompare(String(b.memberId))
   ));
 }
@@ -1206,6 +1313,7 @@ const SK = {
   counselingReservations: "counseling:reservations",
   counselingMeta: "counseling:meta",
   counselingActiveMembers: "counseling:activeMembers",
+  counselingNewMembers: "counseling:newMembers",
 };
 function withTimeout(promise, ms, label) {
   return new Promise((resolve, reject) => {
@@ -1241,10 +1349,10 @@ async function ensureSeeded() {
   return true;
 }
 async function loadAllData() {
-  const [staff, trials, joins, memberMonthly, baselines, budgetTargets, revenueActuals, settings, cancellations, counselingReservations, counselingMeta, counselingActiveMembers] = await Promise.all([
+  const [staff, trials, joins, memberMonthly, baselines, budgetTargets, revenueActuals, settings, cancellations, counselingReservations, counselingMeta, counselingActiveMembers, counselingNewMembers] = await Promise.all([
     sGet(SK.staff), sGet(SK.trials), sGet(SK.joins), sGet(SK.memberMonthly),
     sGet(SK.baselines), sGet(SK.budgetTargets), sGet(SK.revenueActuals), sGet(SK.settings),
-    sGet(SK.cancellations), sGet(SK.counselingReservations), sGet(SK.counselingMeta), sGet(SK.counselingActiveMembers),
+    sGet(SK.cancellations), sGet(SK.counselingReservations), sGet(SK.counselingMeta), sGet(SK.counselingActiveMembers), sGet(SK.counselingNewMembers),
   ]);
   return {
     staff: staff || SEED_DATA.staff,
@@ -1261,6 +1369,9 @@ async function loadAllData() {
     counselingActiveMembers: counselingActiveMembers && typeof counselingActiveMembers === "object" && !Array.isArray(counselingActiveMembers)
       ? { rows: normalizeCounselingActiveMembers(counselingActiveMembers), meta: normalizeCounselingActiveMembersMeta(counselingActiveMembers) }
       : normalizeCounselingActiveMembers(counselingActiveMembers),
+    counselingNewMembers: counselingNewMembers && typeof counselingNewMembers === "object" && !Array.isArray(counselingNewMembers)
+      ? { rows: normalizeCounselingNewMembers(counselingNewMembers), meta: normalizeCounselingNewMembersMeta(counselingNewMembers) }
+      : normalizeCounselingNewMembers(counselingNewMembers),
   };
 }
 // read-modify-write: 同時編集での上書きリスクを下げる
@@ -3562,6 +3673,245 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
   );
 }
 
+function NewMemberImportPanel({ data, updateData, showToast }) {
+  const [newMembersCsvText, setNewMembersCsvText] = useState("");
+  const [newMembersImportStats, setNewMembersImportStats] = useState(null);
+  const [newMembersImportError, setNewMembersImportError] = useState("");
+  const [newMembersFileName, setNewMembersFileName] = useState("");
+  const [newMembersSelectedFile, setNewMembersSelectedFile] = useState(null);
+  const newMembersFileInputRef = useRef(null);
+  const newMembers = normalizeCounselingNewMembers(data.counselingNewMembers);
+  const newMembersMeta = normalizeCounselingNewMembersMeta(data.counselingNewMembers);
+
+  const reset = () => {
+    setNewMembersCsvText("");
+    setNewMembersImportStats(null);
+    setNewMembersImportError("");
+    setNewMembersFileName("");
+    setNewMembersSelectedFile(null);
+    if (newMembersFileInputRef.current) newMembersFileInputRef.current.value = "";
+  };
+
+  const doParse = useCallback((text, name = "") => {
+    const rawText = String(text ?? "");
+    const clean = rawText.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    if (!clean.trim()) {
+      const message = "CSV本文を読み取れませんでした。ファイル選択または貼り付け内容を確認してください。";
+      setNewMembersImportStats({
+        rows: [],
+        stats: activeMemberPreviewStats(clean, { data: [], meta: { fields: [] } }, {
+          rowCount: 0, validCount: 0, excludedCount: 0, blankMemberIdCount: 0, duplicateMemberIdCount: 0, unknownStartDateCount: 0,
+        }),
+        filename: name || "貼り付けCSV",
+        message,
+      });
+      setNewMembersImportError(message);
+      return;
+    }
+    setNewMembersImportError("");
+    Papa.parse(clean, {
+      header: true,
+      skipEmptyLines: true,
+      transformHeader: (header) => String(header ?? "").replace(/^\uFEFF/, "").trim().replace(/^[　\s]+|[　\s]+$/g, ""),
+      complete: (res) => {
+        const rawRows = res.data || [];
+        const parsed = parseCounselingNewMembers(rawRows);
+        const message = rawRows.length === 0 ? "CSV本文を読み取れませんでした。ファイル選択または貼り付け内容を確認してください。" : "";
+        setNewMembersImportStats({
+          rows: parsed.rows,
+          stats: activeMemberPreviewStats(clean, res, parsed.stats),
+          filename: name || "貼り付けCSV",
+          message,
+        });
+        setNewMembersImportError(message);
+      },
+      error: () => {
+        setNewMembersImportError("CSVの解析に失敗しました。");
+        showToast("CSVの解析に失敗しました。", true);
+      },
+    });
+  }, [showToast]);
+
+  const handleNewMembersFileChange = useCallback(async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    console.info("[counseling new import] file selected", f.name, f.size);
+    setNewMembersFileName(f.name);
+    setNewMembersSelectedFile(f);
+    setNewMembersCsvText("");
+    setNewMembersImportStats(null);
+    setNewMembersImportError("");
+    try {
+      const text = await f.text();
+      setNewMembersCsvText(text);
+    } catch (error) {
+      console.warn("[counseling] new member file.text failed", error);
+      setNewMembersImportError("ファイルの読み込みに失敗しました。");
+      showToast("ファイルの読み込みに失敗しました。", true);
+    }
+  }, [showToast]);
+
+  const importNewMembersCsv = useCallback(async () => {
+    if (newMembersCsvText.trim()) {
+      doParse(newMembersCsvText, newMembersFileName);
+      return;
+    }
+    if (newMembersSelectedFile) {
+      try {
+        const text = await newMembersSelectedFile.text();
+        setNewMembersCsvText(text);
+        doParse(text, newMembersSelectedFile.name || newMembersFileName);
+        return;
+      } catch (error) {
+        console.warn("[counseling] new member selectedFile.text failed", error);
+        setNewMembersImportError("ファイルの読み込みに失敗しました。");
+        showToast("ファイルの読み込みに失敗しました。", true);
+        return;
+      }
+    }
+    doParse("", newMembersFileName);
+  }, [newMembersCsvText, newMembersFileName, newMembersSelectedFile, doParse, showToast]);
+
+  const handleImport = async () => {
+    if (!newMembersImportStats) {
+      showToast("CSVを読み込んでください。", true);
+      return;
+    }
+    if (!newMembersImportStats.rows.length) {
+      showToast("保存対象の新規入会者データがありません。", true);
+      return;
+    }
+    await updateData("counselingNewMembers", () => ({
+      rows: newMembersImportStats.rows,
+      meta: {
+        importedAt: new Date().toISOString(),
+        filename: newMembersImportStats.filename,
+        ...newMembersImportStats.stats,
+      },
+    }));
+    showToast(`新規入会者 ${newMembersImportStats.rows.length}件を保存しました`);
+    reset();
+  };
+
+  return (
+    <div className="f4h-card" style={{ padding: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+        <Upload size={16} /><div style={{ fontWeight: 700, fontSize: 14 }}>hacomono「メンバー一覧（新規入会）」CSVを取り込む</div>
+      </div>
+      <p style={{ fontSize: 12.5, color: "var(--ink-faint)", margin: "2px 0 14px", lineHeight: 1.7 }}>
+        新規入会CSVは全置換保存します。店舗判定は「所属店舗名」、利用開始日は「プラン契約適用開始日」を優先し、空欄の場合のみ「入会日時」を使います。
+      </p>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+        <button type="button" className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} onClick={() => newMembersFileInputRef.current?.click()}>
+          <Upload size={14} /> CSVファイルを選択
+        </button>
+        <input
+          id="newMembersCsvInput"
+          name="newMembersCsvInput"
+          ref={newMembersFileInputRef}
+          type="file"
+          accept=".csv,text/csv"
+          data-import-handler="newMembers"
+          style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }}
+          onClick={(e) => { e.currentTarget.value = ""; }}
+          onChange={handleNewMembersFileChange}
+        />
+        <span style={{ fontSize: 12, color: "var(--ink-faint)", alignSelf: "center" }}>または下に貼り付け</span>
+      </div>
+      <textarea className="f4h-input" rows={4} placeholder="メンバー一覧（新規入会）CSVの内容をここに貼り付け..."
+        style={{ resize: "vertical", fontFamily: "monospace", fontSize: 12 }}
+        value={newMembersCsvText} onChange={(e) => {
+          setNewMembersCsvText(e.target.value);
+          setNewMembersSelectedFile(null);
+          setNewMembersFileName("貼り付け入力");
+          setNewMembersImportStats(null);
+          setNewMembersImportError("");
+        }} />
+      <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "8px 16px" }} onClick={importNewMembersCsv}>
+          読み込む
+        </button>
+        <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} disabled={!newMembersCsvText && !newMembersSelectedFile && !newMembersImportStats && !newMembersImportError} onClick={reset}>
+          <X size={13} /> リセット
+        </button>
+      </div>
+      <div style={{ marginTop: 10, display: "flex", gap: 14, fontSize: 12.5, color: "var(--ink-soft)", flexWrap: "wrap" }}>
+        <CounselingStatLine label="選択中ファイル名" value={newMembersFileName || "—"} />
+        <CounselingStatLine label="CSV本文文字数" value={`${newMembersCsvText.length}文字`} />
+        <CounselingStatLine label="selectedFile" value={newMembersSelectedFile ? "あり" : "なし"} />
+        <CounselingStatLine label="handler" value="newMembers" />
+      </div>
+      {newMembersImportError && !newMembersImportStats && (
+        <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginTop: 10 }}>
+          <AlertTriangle size={14} /> {newMembersImportError}
+        </div>
+      )}
+      {newMembersImportStats && (
+        <div className="f4h-fade-in" style={{ marginTop: 18, borderTop: "1px solid var(--border-soft)", paddingTop: 16 }}>
+          <div style={{ display: "flex", gap: 14, fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 8, flexWrap: "wrap" }}>
+            <CounselingStatLine label="CSV本文文字数" value={`${newMembersImportStats.stats.csvCharCount || 0}文字`} />
+            <CounselingStatLine label="parse後総行数" value={`${newMembersImportStats.stats.parsedRowCount || 0}件`} />
+            <CounselingStatLine label="今回取込の総行数" value={`${newMembersImportStats.stats.rowCount}件`} />
+            <CounselingStatLine label="有効件数" value={`${newMembersImportStats.stats.validCount}件`} />
+            <CounselingStatLine label="メンバーID空欄除外" value={`${newMembersImportStats.stats.blankMemberIdCount}件`} />
+            <CounselingStatLine label="メンバーID重複" value={`${newMembersImportStats.stats.duplicateMemberIdCount}件`} />
+            <CounselingStatLine label="利用開始日不明" value={`${newMembersImportStats.stats.unknownStartDateCount || 0}件`} />
+            <span>ファイル <b>{newMembersImportStats.filename}</b></span>
+          </div>
+          <div style={{ fontSize: 12, color: "var(--ink-faint)", marginBottom: 10, lineHeight: 1.6 }}>
+            検出したヘッダー列名: {newMembersImportStats.stats.headerFields?.length ? newMembersImportStats.stats.headerFields.join(" / ") : "—"}
+          </div>
+          {newMembersImportStats.message && (
+            <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginBottom: 10 }}>
+              <AlertTriangle size={14} /> {newMembersImportStats.message}
+            </div>
+          )}
+          {newMembersImportStats.rows.length === 0 ? (
+            <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginBottom: 10 }}>
+              <AlertTriangle size={14} /> 保存対象の新規入会者データが見つかりません。
+            </div>
+          ) : (
+            <>
+              <div className="scrollbar-thin" style={{ maxHeight: 220, overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8, marginBottom: 12 }}>
+                <table className="f4h-table">
+                  <thead><tr><th>メンバーID</th><th>氏名</th><th>店舗</th><th>利用開始日</th><th>利用開始月</th><th>入会日時</th><th>契約プラン</th></tr></thead>
+                  <tbody>
+                    {newMembersImportStats.rows.slice(0, 50).map((r) => (
+                      <tr key={r.memberId}>
+                        <td>{r.memberId}</td>
+                        <td style={{ textAlign: "left" }}>{r.name || "—"}</td>
+                        <td style={{ textAlign: "left" }}>{r.store || "—"}</td>
+                        <td>{r.startDate || "—"}</td>
+                        <td>{r.startMonth || "—"}</td>
+                        <td>{r.joinDate || "—"}</td>
+                        <td style={{ textAlign: "left" }}>{r.planName || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "9px 18px" }} onClick={handleImport}>
+                <Check size={15} /> 新規入会者 {newMembersImportStats.rows.length}件を保存する
+              </button>
+            </>
+          )}
+        </div>
+      )}
+      <div style={{ marginTop: 14, fontSize: 12.5, color: "var(--ink-soft)" }}>
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+          <CounselingStatLine label="保存済み新規入会者データ 合計" value={`${newMembers.length}件`} />
+          <CounselingStatLine label="最終取込日時" value={newMembersMeta.importedAt ? new Date(newMembersMeta.importedAt).toLocaleString("ja-JP") : "—"} />
+          <CounselingStatLine label="直近取込ファイル名" value={newMembersMeta.filename || "—"} />
+          <CounselingStatLine label="今回取込の総行数" value={`${newMembersMeta.rowCount || 0}件`} />
+          <CounselingStatLine label="有効件数" value={`${newMembersMeta.validCount || newMembers.length || 0}件`} />
+          <CounselingStatLine label="メンバーID空欄除外" value={`${newMembersMeta.blankMemberIdCount || 0}件`} />
+          <CounselingStatLine label="重複除外/上書き" value={`${newMembersMeta.duplicateMemberIdCount || 0}件`} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CounselingKpiCard({ label, value, sub }) {
   return (
     <div className="f4h-card" style={{ padding: 14, minHeight: 86 }}>
@@ -3645,6 +3995,152 @@ function ActiveCounselingProgressSection({ data }) {
                   <td>{row.statusCategory}</td>
                   <td>{row.startDate || "—"}</td>
                   <td>{row.startMonth || "—"}</td>
+                  <td>{counselingStageLabel(row.checkedStage)}</td>
+                  <td>{counselingStageLabel(row.reservedStage)}</td>
+                  <td>{row.finalCounselingDate || "—"}</td>
+                  <td style={{ textAlign: "left" }}>{row.nextCounseling}</td>
+                  <td>{row.firstCounselingDate || "—"}</td>
+                  <td>{row.secondCounselingDate || "—"}</td>
+                  <td>{row.thirdCounselingDate || "—"}</td>
+                  <td>{row.fourthPlusCounselingDate || "—"}</td>
+                  <td style={{ textAlign: "left" }}>{row.finalCounselingName || "—"}</td>
+                  <td>{row.finalCounselingStartTime || "—"}</td>
+                  <td style={{ textAlign: "left" }}>{row.finalCounselingStaffName || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function addMonthsToYearMonth(year, month, delta) {
+  const d = new Date(year, month - 1 + delta, 1);
+  return { year: d.getFullYear(), month: d.getMonth() + 1, ym: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}` };
+}
+function newMemberPeriodRange(mode, customStart, customEnd) {
+  const now = new Date();
+  const current = { year: now.getFullYear(), month: now.getMonth() + 1 };
+  if (mode === "all") return { start: null, end: null, label: "全期間" };
+  if (mode === "current") {
+    const ym = `${current.year}-${String(current.month).padStart(2, "0")}`;
+    return { start: `${ym}-01`, end: `${ym}-31`, label: "当月" };
+  }
+  if (mode === "previous") {
+    const p = addMonthsToYearMonth(current.year, current.month, -1);
+    return { start: `${p.ym}-01`, end: `${p.ym}-31`, label: "前月" };
+  }
+  if (mode === "last3") {
+    const p = addMonthsToYearMonth(current.year, current.month, -2);
+    const ym = `${current.year}-${String(current.month).padStart(2, "0")}`;
+    return { start: `${p.ym}-01`, end: `${ym}-31`, label: "直近3ヶ月" };
+  }
+  if (mode === "last6") {
+    const p = addMonthsToYearMonth(current.year, current.month, -5);
+    const ym = `${current.year}-${String(current.month).padStart(2, "0")}`;
+    return { start: `${p.ym}-01`, end: `${ym}-31`, label: "直近6ヶ月" };
+  }
+  return { start: customStart || null, end: customEnd || null, label: "期間指定" };
+}
+function isInDateRange(dateStr, range) {
+  if (!dateStr) return !range.start && !range.end;
+  if (range.start && dateStr < range.start) return false;
+  if (range.end && dateStr > range.end) return false;
+  return true;
+}
+
+function NewMemberCounselingProgressSection({ data }) {
+  const [storeFilter, setStoreFilter] = useState("all");
+  const [periodMode, setPeriodMode] = useState("all");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
+  const period = useMemo(() => newMemberPeriodRange(periodMode, customStart, customEnd), [periodMode, customStart, customEnd]);
+  const progressRows = useMemo(
+    () => buildNewMemberCounselingProgress(data.counselingNewMembers, data.counselingReservations),
+    [data.counselingNewMembers, data.counselingReservations]
+  );
+  const filteredRows = useMemo(() => progressRows.filter((row) => {
+    if (storeFilter !== "all" && row.store !== storeFilter) return false;
+    return isInDateRange(row.startDate, period);
+  }), [progressRows, storeFilter, period]);
+  const total = filteredRows.length;
+  const stageCounts = [0, 1, 2, 3, 4].map((stage) => (
+    stage === 4 ? filteredRows.filter((row) => row.checkedStage >= 4).length : filteredRows.filter((row) => row.checkedStage === stage).length
+  ));
+  const reached3 = filteredRows.filter((row) => row.checkedStage >= 3).length;
+  const under3 = filteredRows.filter((row) => row.checkedStage < 3).length;
+  const under4 = filteredRows.filter((row) => row.checkedStage < 4).length;
+
+  return (
+    <div className="f4h-card" style={{ padding: 18 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap", marginBottom: 14 }}>
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink-faint)", letterSpacing: ".05em", marginBottom: 4 }}>新規入会者分析</div>
+          <div style={{ fontSize: 20, fontWeight: 800 }}>新規入会者のカウンセリング進捗</div>
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <Pill active={storeFilter === "all"} onClick={() => setStoreFilter("all")}>全店</Pill>
+          {STORE_KEYS.map((store) => (
+            <Pill key={store} active={storeFilter === store} onClick={() => setStoreFilter(store)}>{store}</Pill>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+        {[
+          ["all", "全期間"], ["current", "当月"], ["previous", "前月"], ["last3", "直近3ヶ月"], ["last6", "直近6ヶ月"], ["custom", "期間指定"],
+        ].map(([key, label]) => (
+          <Pill key={key} active={periodMode === key} onClick={() => setPeriodMode(key)}>{label}</Pill>
+        ))}
+        {periodMode === "custom" && (
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            <input className="f4h-input" type="date" style={{ width: 150, padding: "6px 8px" }} value={customStart} onChange={(e) => setCustomStart(e.target.value)} />
+            <span style={{ color: "var(--ink-faint)", fontSize: 12 }}>〜</span>
+            <input className="f4h-input" type="date" style={{ width: 150, padding: "6px 8px" }} value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} />
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(132px, 1fr))", gap: 10, marginBottom: 14 }}>
+        <CounselingKpiCard label="新規入会者数" value={`${num(total)}人`} sub={period.label} />
+        <CounselingKpiCard label="0回" value={`${num(stageCounts[0])}人`} />
+        <CounselingKpiCard label="1回" value={`${num(stageCounts[1])}人`} />
+        <CounselingKpiCard label="2回" value={`${num(stageCounts[2])}人`} />
+        <CounselingKpiCard label="3回" value={`${num(stageCounts[3])}人`} />
+        <CounselingKpiCard label="4回目以降" value={`${num(stageCounts[4])}人`} />
+        <CounselingKpiCard label="3回目到達率" value={total ? pct1(reached3 / total) : "—"} />
+        <CounselingKpiCard label="3回未満人数" value={`${num(under3)}人`} />
+        <CounselingKpiCard label="4回目以降未到達人数" value={`${num(under4)}人`} />
+      </div>
+
+      <p style={{ fontSize: 12.5, color: "var(--ink-faint)", lineHeight: 1.7, margin: "0 0 14px" }}>
+        新規入会者は「プラン契約適用開始日」を利用開始日として集計しています。プラン契約適用開始日が空欄の場合のみ「入会日時」を代替利用します。「最終カウンセリング日」は、自由枠：予約一覧のカウンセリング系予約でチェックインした最新受講日です。無料スタジオレッスン等の最終受講日は含みません。
+      </p>
+
+      {filteredRows.length === 0 ? (
+        <EmptyState title="新規入会者データがありません" sub="メンバー一覧（新規入会）CSVを取り込むと、予約一覧CSVとメンバーIDで突合して表示します。" />
+      ) : (
+        <div className="scrollbar-thin" style={{ overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8 }}>
+          <table className="f4h-table">
+            <thead>
+              <tr>
+                <th>メンバーID</th><th>氏名</th><th>店舗</th><th>利用開始日</th><th>利用開始月</th><th>入会日時</th>
+                <th>受講済み到達段階</th><th>予約込み到達段階</th><th>最終カウンセリング日</th><th>次回必要カウンセリング</th>
+                <th>初回カウンセリング日</th><th>2回目カウンセリング日</th><th>3回目カウンセリング日</th><th>4回目以降カウンセリング日</th>
+                <th>最終カウンセリング名</th><th>最終カウンセリング開始時刻</th><th>最終カウンセリング担当スタッフ</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredRows.map((row) => (
+                <tr key={row.memberId}>
+                  <td>{row.memberId}</td>
+                  <td style={{ textAlign: "left" }}>{row.name || "—"}</td>
+                  <td style={{ textAlign: "left" }}>{row.store || "—"}</td>
+                  <td>{row.startDate || "—"}</td>
+                  <td>{row.startMonth || "—"}</td>
+                  <td>{row.joinDate || "—"}</td>
                   <td>{counselingStageLabel(row.checkedStage)}</td>
                   <td>{counselingStageLabel(row.reservedStage)}</td>
                   <td>{row.finalCounselingDate || "—"}</td>
@@ -3847,6 +4343,8 @@ function CounselingAnalysisView({ data, updateData, showToast }) {
       </div>
       <ActiveMemberImportPanel data={data} updateData={updateData} showToast={showToast} />
       <ActiveCounselingProgressSection data={data} />
+      <NewMemberImportPanel data={data} updateData={updateData} showToast={showToast} />
+      <NewMemberCounselingProgressSection data={data} />
     </div>
   );
 }
@@ -4358,6 +4856,7 @@ export default function App() {
     counselingReservations: [],
     counselingMeta: normalizeCounselingMeta(null),
     counselingActiveMembers: [],
+    counselingNewMembers: [],
   }));
   const [syncing, setSyncing] = useState(true);
   const [nav, setNav] = useState("dashboard");
@@ -4408,6 +4907,7 @@ export default function App() {
       counselingReservations: [],
       counselingMeta: normalizeCounselingMeta(null),
       counselingActiveMembers: [],
+      counselingNewMembers: [],
     };
     await Promise.all(Object.keys(empty).map((k) => sSet(SK[k], empty[k])));
     await sSet(SK.meta, { initialized: true, seededAt: new Date().toISOString(), version: 1, resetAt: new Date().toISOString() });
