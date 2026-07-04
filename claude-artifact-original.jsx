@@ -4375,6 +4375,36 @@ function CounselingKpiCard({ label, value, sub }) {
   );
 }
 
+function CounselingCollapsibleSection({ title, sub, open, onToggle, children }) {
+  return (
+    <section style={{ display: "flex", flexDirection: "column", gap: open ? 12 : 0 }}>
+      <button
+        type="button"
+        className="f4h-btn f4h-btn-ghost f4h-focus"
+        onClick={onToggle}
+        aria-expanded={open}
+        style={{
+          justifyContent: "space-between",
+          width: "100%",
+          padding: "10px 12px",
+          border: "1px solid var(--border-soft)",
+          borderRadius: 8,
+          background: "var(--surface)",
+        }}
+      >
+        <span style={{ display: "flex", alignItems: "center", gap: 8, textAlign: "left" }}>
+          {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+          <span>
+            <span style={{ display: "block", fontSize: 14, fontWeight: 800 }}>{title}</span>
+            {sub && <span style={{ display: "block", marginTop: 2, fontSize: 11.5, color: "var(--ink-faint)" }}>{sub}</span>}
+          </span>
+        </span>
+      </button>
+      {open && <div className="f4h-fade-in" style={{ display: "flex", flexDirection: "column", gap: 12 }}>{children}</div>}
+    </section>
+  );
+}
+
 function ActiveCounselingProgressSection({ data }) {
   const [storeFilter, setStoreFilter] = useState("all");
   const progressRows = useMemo(
@@ -4736,6 +4766,14 @@ function CounselingAnalysisView({ data, updateData, showToast }) {
   const reservations = normalizeCounselingReservations(data.counselingReservations);
   const meta = normalizeCounselingMeta(data.counselingMeta);
   const monthCounts = monthlyCounselingCounts(reservations);
+  const [openImports, setOpenImports] = useState({
+    reservations: true,
+    activeMembers: false,
+    newMembers: false,
+    cancelMembers: false,
+  });
+  const [analysisTab, setAnalysisTab] = useState("activeMembers");
+  const toggleImportSection = (key) => setOpenImports((state) => ({ ...state, [key]: !state[key] }));
 
   const reset = () => {
     setCsvText("");
@@ -4810,6 +4848,12 @@ function CounselingAnalysisView({ data, updateData, showToast }) {
     <div className="f4h-fade-in" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <SectionHeading eyebrow="カウンセリング分析" title="予約一覧CSVの取込・保存状況" />
 
+      <CounselingCollapsibleSection
+        title="予約一覧CSV取込"
+        sub="固定枠・自由枠の予約一覧CSVを取り込み、カウンセリング予約として保存します"
+        open={openImports.reservations}
+        onToggle={() => toggleImportSection("reservations")}
+      >
       <div className="f4h-card" style={{ padding: 18 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
           <Upload size={16} /><div style={{ fontWeight: 700, fontSize: 14 }}>hacomono「予約一覧」CSVを取り込む</div>
@@ -4913,12 +4957,51 @@ function CounselingAnalysisView({ data, updateData, showToast }) {
           )}
         </div>
       </div>
-      <ActiveMemberImportPanel data={data} updateData={updateData} showToast={showToast} />
-      <ActiveCounselingProgressSection data={data} />
-      <NewMemberImportPanel data={data} updateData={updateData} showToast={showToast} />
-      <NewMemberCounselingProgressSection data={data} />
-      <CancelMemberImportPanel data={data} updateData={updateData} showToast={showToast} />
-      <CancelMemberCounselingProgressSection data={data} />
+      </CounselingCollapsibleSection>
+
+      <CounselingCollapsibleSection
+        title="在籍者CSV取込"
+        sub="メンバー一覧（契約中）CSVを保存します"
+        open={openImports.activeMembers}
+        onToggle={() => toggleImportSection("activeMembers")}
+      >
+        <ActiveMemberImportPanel data={data} updateData={updateData} showToast={showToast} />
+      </CounselingCollapsibleSection>
+
+      <CounselingCollapsibleSection
+        title="新規入会者CSV取込"
+        sub="メンバー一覧（新規入会）CSVを保存します"
+        open={openImports.newMembers}
+        onToggle={() => toggleImportSection("newMembers")}
+      >
+        <NewMemberImportPanel data={data} updateData={updateData} showToast={showToast} />
+      </CounselingCollapsibleSection>
+
+      <CounselingCollapsibleSection
+        title="退会者CSV取込"
+        sub="メンバー一覧（退会）CSVを保存します"
+        open={openImports.cancelMembers}
+        onToggle={() => toggleImportSection("cancelMembers")}
+      >
+        <CancelMemberImportPanel data={data} updateData={updateData} showToast={showToast} />
+      </CounselingCollapsibleSection>
+
+      <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink-faint)", letterSpacing: ".05em", marginBottom: 4 }}>分析</div>
+            <div style={{ fontSize: 20, fontWeight: 800 }}>カウンセリング進捗</div>
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            <Pill active={analysisTab === "activeMembers"} onClick={() => setAnalysisTab("activeMembers")}>在籍者</Pill>
+            <Pill active={analysisTab === "newMembers"} onClick={() => setAnalysisTab("newMembers")}>新規入会者</Pill>
+            <Pill active={analysisTab === "cancelMembers"} onClick={() => setAnalysisTab("cancelMembers")}>退会者</Pill>
+          </div>
+        </div>
+        {analysisTab === "activeMembers" && <ActiveCounselingProgressSection data={data} />}
+        {analysisTab === "newMembers" && <NewMemberCounselingProgressSection data={data} />}
+        {analysisTab === "cancelMembers" && <CancelMemberCounselingProgressSection data={data} />}
+      </section>
     </div>
   );
 }
