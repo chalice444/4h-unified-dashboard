@@ -1483,7 +1483,10 @@ async function sSet(key, value) {
   try {
     const r = await withTimeout(window.storage.set(key, JSON.stringify(value), true), 8000, "set:" + key);
     return !!r;
-  } catch (e) { return false; }
+  } catch (e) {
+    console.warn("[storage] sSet failed", key, e);
+    return false;
+  }
 }
 async function ensureSeeded() {
   const meta = await sGet(SK.meta);
@@ -1526,10 +1529,17 @@ async function loadAllData() {
 }
 // read-modify-write: 同時編集での上書きリスクを下げる
 async function mutate(key, mutateFn) {
-  const current = await sGet(key);
+  const storageKey = SK[key] || key;
+  const current = await sGet(storageKey);
   const base = current == null ? SEED_DATA[key] : current;
   const next = mutateFn(base);
-  await sSet(key, next);
+  const saved = await sSet(storageKey, next);
+  if (!saved) throw new Error("storage set failed:" + storageKey);
+  if (storageKey.startsWith("counseling:")) {
+    const confirmed = await sGet(storageKey);
+    if (confirmed == null && next != null) throw new Error("storage readback failed:" + storageKey);
+    return confirmed == null ? next : confirmed;
+  }
   return next;
 }
 
