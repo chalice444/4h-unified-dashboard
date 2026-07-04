@@ -740,6 +740,7 @@ function exactRowValue(row, names) {
 }
 function normalizedCsvHeaderName(value) {
   return String(value ?? "")
+    .normalize("NFKC")
     .replace(/^\uFEFF/, "")
     .replace(/[\u200B-\u200D\uFEFF]/g, "")
     .trim()
@@ -3315,17 +3316,19 @@ function CounselingStatLine({ label, value }) {
 }
 
 function ActiveMemberImportPanel({ data, updateData, showToast }) {
-  const [csvText, setCsvText] = useState("");
-  const [preview, setPreview] = useState(null);
-  const [fileName, setFileName] = useState("");
+  const [activeMembersCsvText, setActiveMembersCsvText] = useState("");
+  const [activeMembersImportStats, setActiveMembersImportStats] = useState(null);
+  const [activeMembersImportError, setActiveMembersImportError] = useState("");
+  const [activeMembersFileName, setActiveMembersFileName] = useState("");
   const fileRef = useRef(null);
   const activeMembers = normalizeCounselingActiveMembers(data.counselingActiveMembers);
   const activeMembersMeta = normalizeCounselingActiveMembersMeta(data.counselingActiveMembers);
 
   const reset = () => {
-    setCsvText("");
-    setPreview(null);
-    setFileName("");
+    setActiveMembersCsvText("");
+    setActiveMembersImportStats(null);
+    setActiveMembersImportError("");
+    setActiveMembersFileName("");
     if (fileRef.current) fileRef.current.value = "";
   };
 
@@ -3333,7 +3336,8 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
     const rawText = String(text ?? "");
     const clean = rawText.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
     if (!clean.trim()) {
-      setPreview({
+      const message = "CSV本文を読み取れませんでした。ファイル選択または貼り付け内容を確認してください。";
+      setActiveMembersImportStats({
         rows: [],
         stats: activeMemberPreviewStats(clean, { data: [], meta: { fields: [] } }, {
           rowCount: 0,
@@ -3343,66 +3347,77 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
           duplicateMemberIdCount: 0,
         }),
         filename: name || "貼り付けCSV",
-        message: "CSV本文を読み取れませんでした。ファイル選択または貼り付け内容を確認してください。",
+        message,
       });
+      setActiveMembersImportError(message);
       return;
     }
+    setActiveMembersImportError("");
     Papa.parse(clean, {
       header: true,
       skipEmptyLines: "greedy",
-      transformHeader: (header) => String(header ?? "").replace(/^\uFEFF/, "").trim(),
+      transformHeader: (header) => String(header ?? "").replace(/^\uFEFF/, "").trim().replace(/^[　\s]+|[　\s]+$/g, ""),
       complete: (res) => {
         const rawRows = res.data || [];
         const parsed = parseCounselingActiveMembers(rawRows);
-        setPreview({
+        const message = rawRows.length === 0
+          ? "CSV本文を読み取れませんでした。ファイル選択または貼り付け内容を確認してください。"
+          : "";
+        setActiveMembersImportStats({
           rows: parsed.rows,
           stats: activeMemberPreviewStats(clean, res, parsed.stats),
           filename: name || "貼り付けCSV",
-          message: rawRows.length === 0
-            ? "CSV本文を読み取れませんでした。ファイル選択または貼り付け内容を確認してください。"
-            : "",
+          message,
         });
+        setActiveMembersImportError(message);
       },
-      error: () => showToast("CSVの解析に失敗しました。", true),
+      error: () => {
+        setActiveMembersImportError("CSVの解析に失敗しました。");
+        showToast("CSVの解析に失敗しました。", true);
+      },
     });
   }, [showToast]);
 
   const onFile = useCallback((e) => {
     const f = e.target.files?.[0];
     if (!f) return;
-    setFileName(f.name);
+    setActiveMembersFileName(f.name);
+    setActiveMembersImportStats(null);
+    setActiveMembersImportError("");
     const reader = new FileReader();
     reader.onload = (ev) => {
-      const text = ev.target.result;
-      setCsvText(text);
-      doParse(text, f.name);
+      const text = String(ev.target.result ?? "");
+      setActiveMembersCsvText(text);
     };
-    reader.onerror = () => showToast("ファイルの読み込みに失敗しました。", true);
+    reader.onerror = () => {
+      setActiveMembersImportError("ファイルの読み込みに失敗しました。");
+      showToast("ファイルの読み込みに失敗しました。", true);
+    };
     reader.readAsText(f, "UTF-8");
-  }, [doParse, showToast]);
+  }, [showToast]);
 
   const onParseText = useCallback(() => {
-    doParse(csvText, fileName);
-  }, [csvText, doParse, fileName]);
+    doParse(activeMembersCsvText, activeMembersFileName);
+  }, [activeMembersCsvText, activeMembersFileName, doParse]);
 
   const handleImport = async () => {
-    if (!preview) {
+    if (!activeMembersImportStats) {
       showToast("CSVを読み込んでください。", true);
       return;
     }
-    if (!preview.rows.length) {
+    if (!activeMembersImportStats.rows.length) {
       showToast("保存対象の在籍者データがありません。", true);
       return;
     }
     await updateData("counselingActiveMembers", () => ({
-      rows: preview.rows,
+      rows: activeMembersImportStats.rows,
       meta: {
         importedAt: new Date().toISOString(),
-        filename: preview.filename,
-        ...preview.stats,
+        filename: activeMembersImportStats.filename,
+        ...activeMembersImportStats.stats,
       },
     }));
-    showToast(`在籍者 ${preview.rows.length}件を保存しました`);
+    showToast(`在籍者 ${activeMembersImportStats.rows.length}件を保存しました`);
     reset();
   };
 
@@ -3423,37 +3438,50 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
       </div>
       <textarea className="f4h-input" rows={4} placeholder="メンバー一覧（契約中）CSVの内容をここに貼り付け..."
         style={{ resize: "vertical", fontFamily: "monospace", fontSize: 12 }}
-        value={csvText} onChange={(e) => setCsvText(e.target.value)} />
+        value={activeMembersCsvText} onChange={(e) => {
+          setActiveMembersCsvText(e.target.value);
+          setActiveMembersImportStats(null);
+          setActiveMembersImportError("");
+        }} />
       <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
         <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "8px 16px" }} onClick={onParseText}>
           読み込む
         </button>
-        <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} disabled={!csvText && !preview} onClick={reset}>
+        <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} disabled={!activeMembersCsvText && !activeMembersImportStats && !activeMembersImportError} onClick={reset}>
           <X size={13} /> リセット
         </button>
       </div>
+      <div style={{ marginTop: 10, display: "flex", gap: 14, fontSize: 12.5, color: "var(--ink-soft)", flexWrap: "wrap" }}>
+        <CounselingStatLine label="選択中ファイル名" value={activeMembersFileName || "—"} />
+        <CounselingStatLine label="CSV本文文字数" value={`${activeMembersCsvText.length}文字`} />
+      </div>
+      {activeMembersImportError && !activeMembersImportStats && (
+        <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginTop: 10 }}>
+          <AlertTriangle size={14} /> {activeMembersImportError}
+        </div>
+      )}
 
-      {preview && (
+      {activeMembersImportStats && (
         <div className="f4h-fade-in" style={{ marginTop: 18, borderTop: "1px solid var(--border-soft)", paddingTop: 16 }}>
           <div style={{ display: "flex", gap: 14, fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 8, flexWrap: "wrap" }}>
-            <CounselingStatLine label="CSV本文文字数" value={`${preview.stats.csvCharCount || 0}文字`} />
-            <CounselingStatLine label="parse後総行数" value={`${preview.stats.parsedRowCount || 0}件`} />
-            <CounselingStatLine label="今回取込の総行数" value={`${preview.stats.rowCount}件`} />
-            <CounselingStatLine label="有効件数" value={`${preview.stats.validCount}件`} />
-            <CounselingStatLine label="対象外件数" value={`${preview.stats.excludedCount}件`} />
-            <CounselingStatLine label="メンバーID空欄除外" value={`${preview.stats.blankMemberIdCount}件`} />
-            <CounselingStatLine label="メンバーID重複" value={`${preview.stats.duplicateMemberIdCount}件`} />
-            <span>ファイル <b>{preview.filename}</b></span>
+            <CounselingStatLine label="CSV本文文字数" value={`${activeMembersImportStats.stats.csvCharCount || 0}文字`} />
+            <CounselingStatLine label="parse後総行数" value={`${activeMembersImportStats.stats.parsedRowCount || 0}件`} />
+            <CounselingStatLine label="今回取込の総行数" value={`${activeMembersImportStats.stats.rowCount}件`} />
+            <CounselingStatLine label="有効件数" value={`${activeMembersImportStats.stats.validCount}件`} />
+            <CounselingStatLine label="対象外件数" value={`${activeMembersImportStats.stats.excludedCount}件`} />
+            <CounselingStatLine label="メンバーID空欄除外" value={`${activeMembersImportStats.stats.blankMemberIdCount}件`} />
+            <CounselingStatLine label="メンバーID重複" value={`${activeMembersImportStats.stats.duplicateMemberIdCount}件`} />
+            <span>ファイル <b>{activeMembersImportStats.filename}</b></span>
           </div>
           <div style={{ fontSize: 12, color: "var(--ink-faint)", marginBottom: 10, lineHeight: 1.6 }}>
-            検出したヘッダー列名: {preview.stats.headerFields?.length ? preview.stats.headerFields.join(" / ") : "—"}
+            検出したヘッダー列名: {activeMembersImportStats.stats.headerFields?.length ? activeMembersImportStats.stats.headerFields.join(" / ") : "—"}
           </div>
-          {preview.message && (
+          {activeMembersImportStats.message && (
             <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginBottom: 10 }}>
-              <AlertTriangle size={14} /> {preview.message}
+              <AlertTriangle size={14} /> {activeMembersImportStats.message}
             </div>
           )}
-          {preview.rows.length === 0 ? (
+          {activeMembersImportStats.rows.length === 0 ? (
             <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginBottom: 10 }}>
               <AlertTriangle size={14} /> 保存対象の在籍者データが見つかりません。
             </div>
@@ -3463,7 +3491,7 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
                 <table className="f4h-table">
                   <thead><tr><th>メンバーID</th><th>氏名</th><th>店舗</th><th>ステータス</th><th>利用開始日</th><th>利用開始月</th><th>契約プラン</th></tr></thead>
                   <tbody>
-                    {preview.rows.slice(0, 50).map((r) => (
+                    {activeMembersImportStats.rows.slice(0, 50).map((r) => (
                       <tr key={r.memberId}>
                         <td>{r.memberId}</td>
                         <td style={{ textAlign: "left" }}>{r.name || "—"}</td>
@@ -3478,7 +3506,7 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
                 </table>
               </div>
               <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "9px 18px" }} onClick={handleImport}>
-                <Check size={15} /> 在籍者 {preview.rows.length}件を保存する
+                <Check size={15} /> 在籍者 {activeMembersImportStats.rows.length}件を保存する
               </button>
             </>
           )}
