@@ -599,6 +599,134 @@ function mergeCancellationImport(currentValue, parsed, source) {
     source,
   };
 }
+const COUNSELING_TICKETS = [
+  "初回カウンセリング",
+  "２回目カウンセリング",
+  "３回目カウンセリング",
+  "４回目以降カウンセリング",
+];
+function normalizeCounselingReservations(value) {
+  if (Array.isArray(value)) return value;
+  if (Array.isArray(value?.rows)) return value.rows;
+  return [];
+}
+function normalizeCounselingMeta(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {
+    importedAt: null,
+    filename: null,
+    rowCount: 0,
+    validCount: 0,
+    excludedCount: 0,
+    blankMemberIdCount: 0,
+    ticketExcludedCount: 0,
+    unknownDateCount: 0,
+    duplicateFallbackCount: 0,
+  };
+}
+function parseCounselingDate(raw) {
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  let m = s.match(/^(\d{4})[\/\-年](\d{1,2})[\/\-月](\d{1,2})日?/);
+  if (m) return `${m[1]}-${String(m[2]).padStart(2, "0")}-${String(m[3]).padStart(2, "0")}`;
+  m = s.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  return parseFlexibleDate(s);
+}
+function counselingMonthOf(row) {
+  return row?.lessonMonth || monthOfIsoDate(row?.lessonDate);
+}
+function counselingMonthLabel(ym) {
+  const [year, month] = String(ym || "").split("-");
+  if (!year || !month) return ym || "—";
+  return `${Number(year)}年${Number(month)}月`;
+}
+function monthlyCounselingCounts(rows) {
+  const counts = {};
+  for (const row of normalizeCounselingReservations(rows)) {
+    const ym = counselingMonthOf(row);
+    if (!ym) continue;
+    counts[ym] = (counts[ym] || 0) + 1;
+  }
+  return Object.entries(counts)
+    .map(([ym, count]) => ({ ym, count }))
+    .sort((a, b) => b.ym.localeCompare(a.ym));
+}
+function isCounselingTicket(ticketRaw) {
+  const ticket = String(ticketRaw || "").trim();
+  return COUNSELING_TICKETS.includes(ticket);
+}
+function counselingReservationKey(row) {
+  if (row.reservationId) return `reservation:${row.reservationId}`;
+  return `fallback:${row.memberId || ""}__${row.lessonDate || ""}__${row.startTime || ""}__${row.ticket || ""}`;
+}
+function parseCounselingRows(rawRows) {
+  const map = new Map();
+  const stats = {
+    rowCount: rawRows.length,
+    validCount: 0,
+    excludedCount: 0,
+    blankMemberIdCount: 0,
+    ticketExcludedCount: 0,
+    unknownDateCount: 0,
+    duplicateFallbackCount: 0,
+  };
+  for (const row of rawRows) {
+    const ticket = String(rowValue(row, ["使用チケット", "チケット", "チケット名"]) || "").trim();
+    if (!isCounselingTicket(ticket)) {
+      stats.ticketExcludedCount += 1;
+      continue;
+    }
+    const memberId = normalizeMemberId(rowValue(row, ["メンバーID", "会員ID", "メンバー_ID"]));
+    if (!memberId) {
+      stats.blankMemberIdCount += 1;
+      continue;
+    }
+    const lessonDate = parseCounselingDate(rowValue(row, ["受講日", "予約日", "実施日", "来店日"]));
+    const lessonMonth = monthOfIsoDate(lessonDate);
+    if (!lessonMonth) {
+      stats.unknownDateCount += 1;
+      continue;
+    }
+    const reservationId = String(rowValue(row, ["予約ID", "予約 Id", "予約番号"]) || "").trim();
+    const startTime = parseFlexibleTime(rowValue(row, ["開始時刻", "開始時間", "開始"])) || String(rowValue(row, ["開始時刻", "開始時間", "開始"]) || "").trim();
+    const record = {
+      reservationId,
+      reservationStatus: String(rowValue(row, ["予約ステータス", "ステータス"]) || "").trim(),
+      store: matchStoreName(rowValue(row, ["店舗", "店舗名", "施設", "施設名"])) || String(rowValue(row, ["店舗", "店舗名", "施設", "施設名"]) || "").trim(),
+      ticket,
+      processedDate: parseCounselingDate(rowValue(row, ["予約処理日", "予約受付日", "申込日"])),
+      lessonDate,
+      lessonMonth,
+      startTime,
+      endTime: parseFlexibleTime(rowValue(row, ["終了時刻", "終了時間", "終了"])) || String(rowValue(row, ["終了時刻", "終了時間", "終了"]) || "").trim(),
+      staffName: String(rowValue(row, ["スタッフ名", "担当スタッフ", "担当者"]) || "").trim(),
+      memberId,
+      name: String(rowValue(row, ["氏名", "名前", "会員名", "メンバー名"]) || "").trim(),
+      gender: String(rowValue(row, ["性別"]) || "").trim(),
+      age: Number(rowValue(row, ["年齢"])) || null,
+    };
+    const key = counselingReservationKey(record);
+    if (!reservationId && map.has(key)) {
+      stats.duplicateFallbackCount += 1;
+      console.warn("[counseling] duplicate fallback reservation key; later row wins", key);
+    }
+    map.set(key, record);
+  }
+  const rows = [...map.values()];
+  stats.validCount = rows.length;
+  stats.excludedCount = stats.rowCount - stats.validCount;
+  return { rows, stats };
+}
+function mergeCounselingReservations(currentValue, rows) {
+  const currentRows = normalizeCounselingReservations(currentValue);
+  const importMonths = [...new Set((rows || []).map(counselingMonthOf).filter(Boolean))];
+  const importMonthSet = new Set(importMonths);
+  return [
+    ...currentRows.filter((row) => !importMonthSet.has(counselingMonthOf(row))),
+    ...(rows || []),
+  ];
+}
 function cancellationRowsOf(data) {
   const value = data?.cancellations;
   if (Array.isArray(value)) return value;
@@ -891,6 +1019,8 @@ const SK = {
   memberMonthly: "memberMonthly", baselines: "baselines",
   budgetTargets: "budgetTargets", revenueActuals: "revenueActuals", settings: "settings",
   cancellations: "cancellations",
+  counselingReservations: "counseling:reservations",
+  counselingMeta: "counseling:meta",
 };
 function withTimeout(promise, ms, label) {
   return new Promise((resolve, reject) => {
@@ -926,10 +1056,10 @@ async function ensureSeeded() {
   return true;
 }
 async function loadAllData() {
-  const [staff, trials, joins, memberMonthly, baselines, budgetTargets, revenueActuals, settings, cancellations] = await Promise.all([
+  const [staff, trials, joins, memberMonthly, baselines, budgetTargets, revenueActuals, settings, cancellations, counselingReservations, counselingMeta] = await Promise.all([
     sGet(SK.staff), sGet(SK.trials), sGet(SK.joins), sGet(SK.memberMonthly),
     sGet(SK.baselines), sGet(SK.budgetTargets), sGet(SK.revenueActuals), sGet(SK.settings),
-    sGet(SK.cancellations),
+    sGet(SK.cancellations), sGet(SK.counselingReservations), sGet(SK.counselingMeta),
   ]);
   return {
     staff: staff || SEED_DATA.staff,
@@ -941,6 +1071,8 @@ async function loadAllData() {
     revenueActuals: revenueActuals || SEED_DATA.revenueActuals,
     settings: settings || SEED_DATA.settings,
     cancellations: cancellations || { rows: [], importedAt: null, source: null },
+    counselingReservations: normalizeCounselingReservations(counselingReservations),
+    counselingMeta: normalizeCounselingMeta(counselingMeta),
   };
 }
 // read-modify-write: 同時編集での上書きリスクを下げる
@@ -1272,6 +1404,7 @@ const NAV_SECTIONS = [
     items: [
       { key: "cvr", label: "CVR分析", icon: BarChart3 },
       { key: "cancellation", label: "退会分析", icon: UserMinus },
+      { key: "counseling", label: "カウンセリング分析", icon: UserCog },
       { key: "marketing", label: "マーケティング分析", icon: Target },
     ],
   },
@@ -2991,6 +3124,189 @@ function DataEntryView({ data, updateData, showToast }) {
   );
 }
 
+function CounselingAnalysisView({ data, updateData, showToast }) {
+  const [csvText, setCsvText] = useState("");
+  const [preview, setPreview] = useState(null);
+  const [fileName, setFileName] = useState("");
+  const fileRef = useRef(null);
+  const reservations = normalizeCounselingReservations(data.counselingReservations);
+  const meta = normalizeCounselingMeta(data.counselingMeta);
+  const monthCounts = monthlyCounselingCounts(reservations);
+
+  const reset = () => {
+    setCsvText("");
+    setPreview(null);
+    setFileName("");
+    if (fileRef.current) fileRef.current.value = "";
+  };
+
+  const doParse = useCallback((text, name = "") => {
+    const clean = text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    Papa.parse(clean, {
+      header: true,
+      skipEmptyLines: true,
+      complete: (res) => {
+        const rawRows = res.data || [];
+        const parsed = parseCounselingRows(rawRows);
+        setPreview({
+          rows: parsed.rows,
+          stats: parsed.stats,
+          filename: name || "貼り付けCSV",
+        });
+      },
+      error: () => showToast("CSVの解析に失敗しました。", true),
+    });
+  }, [showToast]);
+
+  const onFile = useCallback((e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setFileName(f.name);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = ev.target.result;
+      setCsvText(text);
+      doParse(text, f.name);
+    };
+    reader.onerror = () => showToast("ファイルの読み込みに失敗しました。", true);
+    reader.readAsText(f, "UTF-8");
+  }, [doParse, showToast]);
+
+  const onParseText = useCallback(() => {
+    if (csvText.trim()) doParse(csvText, fileName);
+  }, [csvText, doParse, fileName]);
+
+  const handleImport = async () => {
+    if (!preview) {
+      showToast("CSVを読み込んでください。", true);
+      return;
+    }
+    if (!preview.rows.length) {
+      showToast("保存対象のカウンセリング予約がありません。", true);
+      return;
+    }
+    const importedAt = new Date().toISOString();
+    const source = {
+      importedAt,
+      filename: preview.filename,
+      ...preview.stats,
+    };
+    await updateData("counselingReservations", (cur) => mergeCounselingReservations(cur, preview.rows));
+    await updateData("counselingMeta", () => source);
+    showToast(`カウンセリング予約 ${preview.rows.length}件を保存しました`);
+    reset();
+  };
+
+  const StatLine = ({ label, value }) => (
+    <span>{label} <b className="num">{value}</b></span>
+  );
+
+  return (
+    <div className="f4h-fade-in" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <SectionHeading eyebrow="カウンセリング分析" title="予約一覧CSVの取込・保存状況" />
+
+      <div className="f4h-card" style={{ padding: 18 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+          <Upload size={16} /><div style={{ fontWeight: 700, fontSize: 14 }}>hacomono 自由枠：予約一覧CSVを取り込む</div>
+        </div>
+        <p style={{ fontSize: 12.5, color: "var(--ink-faint)", margin: "2px 0 14px", lineHeight: 1.7 }}>
+          使用チケットが「初回カウンセリング」「２回目カウンセリング」「３回目カウンセリング」「４回目以降カウンセリング」の予約だけを保存します。メンバーIDが空欄の行、対象外チケット、受講日が不明な行は保存対象外です。
+        </p>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+          <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} onClick={() => fileRef.current?.click()}>
+            <Upload size={14} /> CSVファイルを選択
+          </button>
+          <input ref={fileRef} type="file" accept=".csv,text/csv" style={{ display: "none" }} onChange={onFile} />
+          <span style={{ fontSize: 12, color: "var(--ink-faint)", alignSelf: "center" }}>または下に貼り付け</span>
+        </div>
+        <textarea className="f4h-input" rows={4} placeholder="CSVの内容をここに貼り付け..."
+          style={{ resize: "vertical", fontFamily: "monospace", fontSize: 12 }}
+          value={csvText} onChange={(e) => setCsvText(e.target.value)} />
+        <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "8px 16px" }} onClick={onParseText} disabled={!csvText.trim()}>
+            読み込む
+          </button>
+          <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} disabled={!csvText && !preview} onClick={reset}>
+            <X size={13} /> リセット
+          </button>
+        </div>
+
+        {preview && (
+          <div className="f4h-fade-in" style={{ marginTop: 18, borderTop: "1px solid var(--border-soft)", paddingTop: 16 }}>
+            <div style={{ display: "flex", gap: 14, fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 8, flexWrap: "wrap" }}>
+              <StatLine label="今回取込の総行数" value={`${preview.stats.rowCount}件`} />
+              <StatLine label="有効件数" value={`${preview.stats.validCount}件`} />
+              <StatLine label="対象外件数" value={`${preview.stats.excludedCount}件`} />
+              <StatLine label="メンバーID空欄除外" value={`${preview.stats.blankMemberIdCount}件`} />
+              <StatLine label="対象外チケット除外" value={`${preview.stats.ticketExcludedCount}件`} />
+              <StatLine label="受講日不明除外" value={`${preview.stats.unknownDateCount}件`} />
+              <span>ファイル <b>{preview.filename}</b></span>
+            </div>
+            {preview.rows.length === 0 ? (
+              <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginBottom: 10 }}>
+                <AlertTriangle size={14} /> 保存対象のカウンセリング予約が見つかりません。
+              </div>
+            ) : (
+              <>
+                <div className="scrollbar-thin" style={{ maxHeight: 220, overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8, marginBottom: 12 }}>
+                  <table className="f4h-table">
+                    <thead><tr><th>受講日</th><th>店舗</th><th>使用チケット</th><th>メンバーID</th><th>氏名</th><th>開始</th><th>スタッフ</th></tr></thead>
+                    <tbody>
+                      {preview.rows.slice(0, 50).map((r) => (
+                        <tr key={counselingReservationKey(r)}>
+                          <td>{r.lessonDate || "—"}</td>
+                          <td style={{ textAlign: "left" }}>{r.store || "—"}</td>
+                          <td style={{ textAlign: "left" }}>{r.ticket || "—"}</td>
+                          <td>{r.memberId}</td>
+                          <td style={{ textAlign: "left" }}>{r.name || "—"}</td>
+                          <td>{r.startTime || "—"}</td>
+                          <td style={{ textAlign: "left" }}>{r.staffName || "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "9px 18px" }} onClick={handleImport}>
+                  <Check size={15} /> カウンセリング予約 {preview.rows.length}件を保存する
+                </button>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="f4h-card" style={{ padding: 18 }}>
+        <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>保存状況</div>
+        <div style={{ display: "flex", gap: 18, flexWrap: "wrap", fontSize: 12.5, color: "var(--ink-soft)" }}>
+          <StatLine label="保存済み予約データ 合計" value={`${reservations.length}件`} />
+          <span>最終取込日時 <b>{meta.importedAt ? new Date(meta.importedAt).toLocaleString("ja-JP") : "—"}</b></span>
+          <span>直近取込ファイル名 <b>{meta.filename || "—"}</b></span>
+          <StatLine label="今回取込の総行数" value={`${meta.rowCount || 0}件`} />
+          <StatLine label="有効件数" value={`${meta.validCount || 0}件`} />
+          <StatLine label="対象外件数" value={`${meta.excludedCount || 0}件`} />
+          <StatLine label="メンバーID空欄除外" value={`${meta.blankMemberIdCount || 0}件`} />
+          <StatLine label="対象外チケット除外" value={`${meta.ticketExcludedCount || 0}件`} />
+          <StatLine label="受講日不明除外" value={`${meta.unknownDateCount || 0}件`} />
+        </div>
+        <div style={{ marginTop: 12, display: "grid", gap: 6 }}>
+          <div style={{ fontSize: 12, color: "var(--ink-soft)", fontWeight: 700 }}>登録済み月</div>
+          {monthCounts.length === 0 ? (
+            <div style={{ fontSize: 12, color: "var(--ink-faint)" }}>—</div>
+          ) : (
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {monthCounts.map((item) => (
+                <span key={item.ym} style={{ border: "1px solid var(--border-soft)", borderRadius: 999, padding: "5px 10px", background: "var(--surface-soft)", fontSize: 12 }}>
+                  {counselingMonthLabel(item.ym)} <b className="num">{item.count}</b>件
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ============================================================
 // CVR分析（店舗別・担当者別）
 // ============================================================
@@ -3492,7 +3808,12 @@ function SettingsView({ data, updateData, showToast, onResetAll }) {
 // ルートアプリ
 // ============================================================
 export default function App() {
-  const [data, setData] = useState(() => ({ ...SEED_DATA, cancellations: { rows: [], importedAt: null, source: null } }));
+  const [data, setData] = useState(() => ({
+    ...SEED_DATA,
+    cancellations: { rows: [], importedAt: null, source: null },
+    counselingReservations: [],
+    counselingMeta: normalizeCounselingMeta(null),
+  }));
   const [syncing, setSyncing] = useState(true);
   const [nav, setNav] = useState("dashboard");
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -3539,6 +3860,8 @@ export default function App() {
       staff: [], trials: [], joins: [], memberMonthly: [], baselines: SEED_DATA.baselines,
       budgetTargets: [], revenueActuals: [], settings: SEED_DATA.settings,
       cancellations: { rows: [], importedAt: null, source: null },
+      counselingReservations: [],
+      counselingMeta: normalizeCounselingMeta(null),
     };
     await Promise.all(Object.keys(empty).map((k) => sSet(SK[k], empty[k])));
     await sSet(SK.meta, { initialized: true, seededAt: new Date().toISOString(), version: 1, resetAt: new Date().toISOString() });
@@ -3569,6 +3892,7 @@ export default function App() {
           {nav === "entry" && <DataEntryView data={data} updateData={updateData} showToast={showToast} />}
           {nav === "monthlyReport" && <MonthlyReportView data={data} />}
           {nav === "cancellation" && <CancellationAnalysisView data={data} />}
+          {nav === "counseling" && <CounselingAnalysisView data={data} updateData={updateData} showToast={showToast} />}
           {nav === "cvr" && <CvrAnalysisView data={data} />}
           {nav === "marketing" && (
             <React.Suspense fallback={<div style={{ padding: 24, color: "var(--ink-faint)" }}>読み込み中...</div>}>
