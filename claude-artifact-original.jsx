@@ -744,7 +744,8 @@ function normalizedCsvHeaderName(value) {
     .replace(/^\uFEFF/, "")
     .replace(/[\u200B-\u200D\uFEFF]/g, "")
     .trim()
-    .replace(/[　\s_＿]/g, "");
+    .replace(/[　\s_＿]/g, "")
+    .toLowerCase();
 }
 function activeMemberRowValue(row, names, { exact = false } = {}) {
   const keys = Object.keys(row || {});
@@ -799,7 +800,7 @@ function parseCounselingActiveMembers(rawRows) {
     duplicateMemberIdCount: 0,
   };
   for (const row of rawRows) {
-    const memberId = normalizeMemberId(activeMemberRowValue(row, ["メンバーID", "会員ID", "メンバー_ID", "会員番号"]));
+    const memberId = normalizeMemberId(activeMemberRowValue(row, ["メンバーID", "メンバー ID", "メンバーＩＤ", "会員ID", "メンバー_ID", "会員番号", "memberId", "member_id"]));
     if (!memberId) {
       stats.blankMemberIdCount += 1;
       continue;
@@ -3320,6 +3321,7 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
   const [activeMembersImportStats, setActiveMembersImportStats] = useState(null);
   const [activeMembersImportError, setActiveMembersImportError] = useState("");
   const [activeMembersFileName, setActiveMembersFileName] = useState("");
+  const [activeMembersSelectedFile, setActiveMembersSelectedFile] = useState(null);
   const fileRef = useRef(null);
   const activeMembers = normalizeCounselingActiveMembers(data.counselingActiveMembers);
   const activeMembersMeta = normalizeCounselingActiveMembersMeta(data.counselingActiveMembers);
@@ -3329,6 +3331,7 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
     setActiveMembersImportStats(null);
     setActiveMembersImportError("");
     setActiveMembersFileName("");
+    setActiveMembersSelectedFile(null);
     if (fileRef.current) fileRef.current.value = "";
   };
 
@@ -3378,27 +3381,44 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
     });
   }, [showToast]);
 
-  const onFile = useCallback((e) => {
+  const handleActiveMembersFileChange = useCallback(async (e) => {
     const f = e.target.files?.[0];
     if (!f) return;
     setActiveMembersFileName(f.name);
+    setActiveMembersSelectedFile(f);
+    setActiveMembersCsvText("");
     setActiveMembersImportStats(null);
     setActiveMembersImportError("");
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const text = String(ev.target.result ?? "");
+    try {
+      const text = await f.text();
       setActiveMembersCsvText(text);
-    };
-    reader.onerror = () => {
+    } catch (error) {
+      console.warn("[counseling] active member file.text failed", error);
       setActiveMembersImportError("ファイルの読み込みに失敗しました。");
       showToast("ファイルの読み込みに失敗しました。", true);
-    };
-    reader.readAsText(f, "UTF-8");
+    }
   }, [showToast]);
 
-  const onParseText = useCallback(() => {
-    doParse(activeMembersCsvText, activeMembersFileName);
-  }, [activeMembersCsvText, activeMembersFileName, doParse]);
+  const importActiveMembersCsv = useCallback(async () => {
+    if (activeMembersCsvText.trim()) {
+      doParse(activeMembersCsvText, activeMembersFileName);
+      return;
+    }
+    if (activeMembersSelectedFile) {
+      try {
+        const text = await activeMembersSelectedFile.text();
+        setActiveMembersCsvText(text);
+        doParse(text, activeMembersSelectedFile.name || activeMembersFileName);
+        return;
+      } catch (error) {
+        console.warn("[counseling] active member selectedFile.text failed", error);
+        setActiveMembersImportError("ファイルの読み込みに失敗しました。");
+        showToast("ファイルの読み込みに失敗しました。", true);
+        return;
+      }
+    }
+    doParse("", activeMembersFileName);
+  }, [activeMembersCsvText, activeMembersFileName, activeMembersSelectedFile, doParse, showToast]);
 
   const handleImport = async () => {
     if (!activeMembersImportStats) {
@@ -3433,27 +3453,29 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
         <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} onClick={() => fileRef.current?.click()}>
           <Upload size={14} /> CSVファイルを選択
         </button>
-        <input ref={fileRef} type="file" accept=".csv,text/csv" style={{ display: "none" }} onChange={onFile} />
+        <input ref={fileRef} type="file" accept=".csv,text/csv" style={{ display: "none" }} onChange={handleActiveMembersFileChange} />
         <span style={{ fontSize: 12, color: "var(--ink-faint)", alignSelf: "center" }}>または下に貼り付け</span>
       </div>
       <textarea className="f4h-input" rows={4} placeholder="メンバー一覧（契約中）CSVの内容をここに貼り付け..."
         style={{ resize: "vertical", fontFamily: "monospace", fontSize: 12 }}
         value={activeMembersCsvText} onChange={(e) => {
           setActiveMembersCsvText(e.target.value);
+          setActiveMembersSelectedFile(null);
           setActiveMembersImportStats(null);
           setActiveMembersImportError("");
         }} />
       <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "8px 16px" }} onClick={onParseText}>
+        <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "8px 16px" }} onClick={importActiveMembersCsv}>
           読み込む
         </button>
-        <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} disabled={!activeMembersCsvText && !activeMembersImportStats && !activeMembersImportError} onClick={reset}>
+        <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} disabled={!activeMembersCsvText && !activeMembersSelectedFile && !activeMembersImportStats && !activeMembersImportError} onClick={reset}>
           <X size={13} /> リセット
         </button>
       </div>
       <div style={{ marginTop: 10, display: "flex", gap: 14, fontSize: 12.5, color: "var(--ink-soft)", flexWrap: "wrap" }}>
         <CounselingStatLine label="選択中ファイル名" value={activeMembersFileName || "—"} />
         <CounselingStatLine label="CSV本文文字数" value={`${activeMembersCsvText.length}文字`} />
+        <CounselingStatLine label="selectedFile" value={activeMembersSelectedFile ? "あり" : "なし"} />
       </div>
       {activeMembersImportError && !activeMembersImportStats && (
         <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginTop: 10 }}>
