@@ -808,6 +808,25 @@ function normalizeCounselingNewMembersMeta(value) {
     unknownStartDateCount: 0,
   };
 }
+function normalizeCounselingCancelMembers(value) {
+  if (Array.isArray(value)) return value;
+  if (Array.isArray(value?.rows)) return value.rows;
+  return [];
+}
+function normalizeCounselingCancelMembersMeta(value) {
+  if (value && typeof value === "object" && !Array.isArray(value) && value.meta) return value.meta;
+  return {
+    importedAt: null,
+    filename: null,
+    rowCount: 0,
+    validCount: 0,
+    excludedCount: 0,
+    blankMemberIdCount: 0,
+    duplicateMemberIdCount: 0,
+    unknownStartDateCount: 0,
+    unknownCancelMonthCount: 0,
+  };
+}
 function parseCounselingActiveMembers(rawRows) {
   const map = new Map();
   const stats = {
@@ -895,6 +914,63 @@ function parseCounselingNewMembers(rawRows) {
       planEndDate: parseCounselingDate(activeMemberRowValue(row, ["プラン契約適用終了日"])),
     };
     map.set(memberId, newMember);
+  }
+  const rows = [...map.values()];
+  stats.validCount = rows.length;
+  stats.excludedCount = stats.rowCount - stats.validCount;
+  return { rows, stats };
+}
+function parseCounselingCancelMembers(rawRows, newMembersValue) {
+  const newMembersById = new Map(normalizeCounselingNewMembers(newMembersValue).map((member) => [member.memberId, member]));
+  const map = new Map();
+  const stats = {
+    rowCount: rawRows.length,
+    validCount: 0,
+    excludedCount: 0,
+    blankMemberIdCount: 0,
+    duplicateMemberIdCount: 0,
+    unknownStartDateCount: 0,
+    unknownCancelMonthCount: 0,
+  };
+  for (const row of rawRows) {
+    const memberId = normalizeMemberId(activeMemberRowValue(row, ["メンバーID", "メンバー ID", "メンバーＩＤ", "会員ID", "メンバー_ID", "会員番号", "memberId", "member_id"]));
+    if (!memberId) {
+      stats.blankMemberIdCount += 1;
+      continue;
+    }
+    const storeRaw = String(activeMemberRowValue(row, ["所属店舗名"], { exact: true }) || "").trim();
+    const joinDate = parseCounselingDate(activeMemberRowValue(row, ["入会日時"]));
+    const planEndDate = parseCounselingDate(activeMemberRowValue(row, ["プラン契約適用終了日"]));
+    const matchingNewMember = newMembersById.get(memberId);
+    const startDate = matchingNewMember?.startDate || joinDate;
+    const cancelMember = {
+      memberId,
+      name: String(activeMemberRowValue(row, ["氏名", "名前", "会員名", "メンバー名"]) || "").trim(),
+      gender: String(activeMemberRowValue(row, ["性別"]) || "").trim(),
+      age: Number(activeMemberRowValue(row, ["年齢"])) || null,
+      belongingStoreName: storeRaw,
+      store: matchStoreName(storeRaw) || storeRaw,
+      joinDate,
+      startDate,
+      startMonth: monthOfIsoDate(startDate),
+      planName: String(activeMemberRowValue(row, ["契約プラン名", "プラン名"]) || "").trim(),
+      planContractDate: parseCounselingDate(activeMemberRowValue(row, ["プラン契約日"])),
+      planStartDate: parseCounselingDate(activeMemberRowValue(row, ["プラン契約適用開始日"])),
+      planEndDate,
+      cancelMonth: monthOfIsoDate(planEndDate),
+      startDateSource: matchingNewMember?.startDate ? "newMembers" : "cancelCsvJoinDate",
+    };
+    if (!cancelMember.startDate) stats.unknownStartDateCount += 1;
+    if (!cancelMember.cancelMonth) stats.unknownCancelMonthCount += 1;
+    if (map.has(memberId)) {
+      stats.duplicateMemberIdCount += 1;
+      const existing = map.get(memberId);
+      const existingEnd = existing.planEndDate || "";
+      const incomingEnd = cancelMember.planEndDate || "";
+      console.warn("[counseling] duplicate cancel member id; selecting latest plan end date or later row", memberId);
+      if (incomingEnd < existingEnd) continue;
+    }
+    map.set(memberId, cancelMember);
   }
   const rows = [...map.values()];
   stats.validCount = rows.length;
@@ -1015,6 +1091,48 @@ function buildNewMemberCounselingProgress(newMembersValue, reservationsValue) {
   }).sort((a, b) => (
     (a.checkedStage - b.checkedStage) ||
     String(a.startDate || "9999-99-99").localeCompare(String(b.startDate || "9999-99-99")) ||
+    String(a.memberId).localeCompare(String(b.memberId))
+  ));
+}
+function buildCancelMemberCounselingProgress(cancelMembersValue, reservationsValue) {
+  const reservationsByMember = new Map();
+  for (const r of normalizeCounselingReservations(reservationsValue)) {
+    if (!r?.memberId || !isCounselingTicket(r.ticket)) continue;
+    if (!reservationsByMember.has(r.memberId)) reservationsByMember.set(r.memberId, []);
+    reservationsByMember.get(r.memberId).push(r);
+  }
+  return normalizeCounselingCancelMembers(cancelMembersValue).map((member) => {
+    const memberReservations = reservationsByMember.get(member.memberId) || [];
+    const checkedIn = memberReservations.filter((r) => counselingStatusIsCheckedIn(r.reservationStatus));
+    const reservedIncluded = memberReservations.filter((r) => counselingStatusIsReserved(r.reservationStatus));
+    const checkedStage = Math.max(0, ...checkedIn.map((r) => counselingTicketStage(r.ticket)));
+    const reservedStage = Math.max(0, ...reservedIncluded.map((r) => counselingTicketStage(r.ticket)));
+    const checkedByStage = {};
+    for (const r of checkedIn) {
+      const stage = counselingTicketStage(r.ticket);
+      if (!stage) continue;
+      const key = Math.min(stage, 4);
+      const current = checkedByStage[key];
+      if (!current || String(r.lessonDate || "").localeCompare(String(current.lessonDate || "")) > 0) checkedByStage[key] = r;
+    }
+    const latest = latestCounselingRow(checkedIn);
+    return {
+      ...member,
+      checkedStage,
+      reservedStage,
+      finalCounselingDate: latest?.lessonDate || null,
+      nextCounseling: nextCounselingName(checkedStage),
+      firstCounselingDate: checkedByStage[1]?.lessonDate || null,
+      secondCounselingDate: checkedByStage[2]?.lessonDate || null,
+      thirdCounselingDate: checkedByStage[3]?.lessonDate || null,
+      fourthPlusCounselingDate: checkedByStage[4]?.lessonDate || null,
+      finalCounselingName: latest?.ticket || "",
+      finalCounselingStartTime: latest?.startTime || "",
+      finalCounselingStaffName: latest?.staffName || "",
+    };
+  }).sort((a, b) => (
+    (a.checkedStage - b.checkedStage) ||
+    String(b.planEndDate || "").localeCompare(String(a.planEndDate || "")) ||
     String(a.memberId).localeCompare(String(b.memberId))
   ));
 }
@@ -1314,6 +1432,7 @@ const SK = {
   counselingMeta: "counseling:meta",
   counselingActiveMembers: "counseling:activeMembers",
   counselingNewMembers: "counseling:newMembers",
+  counselingCancelMembers: "counseling:cancelMembers",
 };
 function withTimeout(promise, ms, label) {
   return new Promise((resolve, reject) => {
@@ -1349,10 +1468,10 @@ async function ensureSeeded() {
   return true;
 }
 async function loadAllData() {
-  const [staff, trials, joins, memberMonthly, baselines, budgetTargets, revenueActuals, settings, cancellations, counselingReservations, counselingMeta, counselingActiveMembers, counselingNewMembers] = await Promise.all([
+  const [staff, trials, joins, memberMonthly, baselines, budgetTargets, revenueActuals, settings, cancellations, counselingReservations, counselingMeta, counselingActiveMembers, counselingNewMembers, counselingCancelMembers] = await Promise.all([
     sGet(SK.staff), sGet(SK.trials), sGet(SK.joins), sGet(SK.memberMonthly),
     sGet(SK.baselines), sGet(SK.budgetTargets), sGet(SK.revenueActuals), sGet(SK.settings),
-    sGet(SK.cancellations), sGet(SK.counselingReservations), sGet(SK.counselingMeta), sGet(SK.counselingActiveMembers), sGet(SK.counselingNewMembers),
+    sGet(SK.cancellations), sGet(SK.counselingReservations), sGet(SK.counselingMeta), sGet(SK.counselingActiveMembers), sGet(SK.counselingNewMembers), sGet(SK.counselingCancelMembers),
   ]);
   return {
     staff: staff || SEED_DATA.staff,
@@ -1372,6 +1491,9 @@ async function loadAllData() {
     counselingNewMembers: counselingNewMembers && typeof counselingNewMembers === "object" && !Array.isArray(counselingNewMembers)
       ? { rows: normalizeCounselingNewMembers(counselingNewMembers), meta: normalizeCounselingNewMembersMeta(counselingNewMembers) }
       : normalizeCounselingNewMembers(counselingNewMembers),
+    counselingCancelMembers: counselingCancelMembers && typeof counselingCancelMembers === "object" && !Array.isArray(counselingCancelMembers)
+      ? { rows: normalizeCounselingCancelMembers(counselingCancelMembers), meta: normalizeCounselingCancelMembersMeta(counselingCancelMembers) }
+      : normalizeCounselingCancelMembers(counselingCancelMembers),
   };
 }
 // read-modify-write: 同時編集での上書きリスクを下げる
@@ -3912,6 +4034,248 @@ function NewMemberImportPanel({ data, updateData, showToast }) {
   );
 }
 
+function CancelMemberImportPanel({ data, updateData, showToast }) {
+  const [cancelMembersCsvText, setCancelMembersCsvText] = useState("");
+  const [cancelMembersImportStats, setCancelMembersImportStats] = useState(null);
+  const [cancelMembersImportError, setCancelMembersImportError] = useState("");
+  const [cancelMembersFileName, setCancelMembersFileName] = useState("");
+  const [cancelMembersSelectedFile, setCancelMembersSelectedFile] = useState(null);
+  const cancelMembersFileInputRef = useRef(null);
+  const cancelMembers = normalizeCounselingCancelMembers(data.counselingCancelMembers);
+  const cancelMembersMeta = normalizeCounselingCancelMembersMeta(data.counselingCancelMembers);
+
+  const reset = () => {
+    setCancelMembersCsvText("");
+    setCancelMembersImportStats(null);
+    setCancelMembersImportError("");
+    setCancelMembersFileName("");
+    setCancelMembersSelectedFile(null);
+    if (cancelMembersFileInputRef.current) cancelMembersFileInputRef.current.value = "";
+  };
+
+  const doParse = useCallback((text, name = "") => {
+    const rawText = String(text ?? "");
+    const clean = rawText.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    if (!clean.trim()) {
+      const message = "CSV本文を読み取れませんでした。ファイル選択または貼り付け内容を確認してください。";
+      setCancelMembersImportStats({
+        rows: [],
+        stats: activeMemberPreviewStats(clean, { data: [], meta: { fields: [] } }, {
+          rowCount: 0, validCount: 0, excludedCount: 0, blankMemberIdCount: 0, duplicateMemberIdCount: 0, unknownStartDateCount: 0, unknownCancelMonthCount: 0,
+        }),
+        filename: name || "貼り付けCSV",
+        message,
+      });
+      setCancelMembersImportError(message);
+      return;
+    }
+    setCancelMembersImportError("");
+    Papa.parse(clean, {
+      header: true,
+      skipEmptyLines: true,
+      transformHeader: (header) => String(header ?? "").replace(/^\uFEFF/, "").trim().replace(/^[　\s]+|[　\s]+$/g, ""),
+      complete: (res) => {
+        const rawRows = res.data || [];
+        const parsed = parseCounselingCancelMembers(rawRows, data.counselingNewMembers);
+        const message = rawRows.length === 0 ? "CSV本文を読み取れませんでした。ファイル選択または貼り付け内容を確認してください。" : "";
+        setCancelMembersImportStats({
+          rows: parsed.rows,
+          stats: activeMemberPreviewStats(clean, res, parsed.stats),
+          filename: name || "貼り付けCSV",
+          message,
+        });
+        setCancelMembersImportError(message);
+      },
+      error: () => {
+        setCancelMembersImportError("CSVの解析に失敗しました。");
+        showToast("CSVの解析に失敗しました。", true);
+      },
+    });
+  }, [data.counselingNewMembers, showToast]);
+
+  const handleCancelMembersFileChange = useCallback(async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    console.info("[counseling cancel import] file selected", f.name, f.size);
+    setCancelMembersFileName(f.name);
+    setCancelMembersSelectedFile(f);
+    setCancelMembersCsvText("");
+    setCancelMembersImportStats(null);
+    setCancelMembersImportError("");
+    try {
+      const text = await f.text();
+      setCancelMembersCsvText(text);
+    } catch (error) {
+      console.warn("[counseling] cancel member file.text failed", error);
+      setCancelMembersImportError("ファイルの読み込みに失敗しました。");
+      showToast("ファイルの読み込みに失敗しました。", true);
+    }
+  }, [showToast]);
+
+  const importCancelMembersCsv = useCallback(async () => {
+    if (cancelMembersCsvText.trim()) {
+      doParse(cancelMembersCsvText, cancelMembersFileName);
+      return;
+    }
+    if (cancelMembersSelectedFile) {
+      try {
+        const text = await cancelMembersSelectedFile.text();
+        setCancelMembersCsvText(text);
+        doParse(text, cancelMembersSelectedFile.name || cancelMembersFileName);
+        return;
+      } catch (error) {
+        console.warn("[counseling] cancel member selectedFile.text failed", error);
+        setCancelMembersImportError("ファイルの読み込みに失敗しました。");
+        showToast("ファイルの読み込みに失敗しました。", true);
+        return;
+      }
+    }
+    doParse("", cancelMembersFileName);
+  }, [cancelMembersCsvText, cancelMembersFileName, cancelMembersSelectedFile, doParse, showToast]);
+
+  const handleImport = async () => {
+    if (!cancelMembersImportStats) {
+      showToast("CSVを読み込んでください。", true);
+      return;
+    }
+    if (!cancelMembersImportStats.rows.length) {
+      showToast("保存対象の退会者データがありません。", true);
+      return;
+    }
+    await updateData("counselingCancelMembers", () => ({
+      rows: cancelMembersImportStats.rows,
+      meta: {
+        importedAt: new Date().toISOString(),
+        filename: cancelMembersImportStats.filename,
+        ...cancelMembersImportStats.stats,
+      },
+    }));
+    showToast(`退会者 ${cancelMembersImportStats.rows.length}件を保存しました`);
+    reset();
+  };
+
+  return (
+    <div className="f4h-card" style={{ padding: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+        <Upload size={16} /><div style={{ fontWeight: 700, fontSize: 14 }}>hacomono「メンバー一覧（退会）」CSVを取り込む</div>
+      </div>
+      <p style={{ fontSize: 12.5, color: "var(--ink-faint)", margin: "2px 0 14px", lineHeight: 1.7 }}>
+        退会CSVは全置換保存します。退会月は「プラン契約適用終了日」、店舗判定は「所属店舗名」を使います。利用開始日は同じメンバーIDが新規入会CSVにあればそちらを優先し、なければ退会CSVの「入会日時」を使います。
+      </p>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+        <button type="button" className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} onClick={() => cancelMembersFileInputRef.current?.click()}>
+          <Upload size={14} /> CSVファイルを選択
+        </button>
+        <input
+          id="cancelMembersCsvInput"
+          name="cancelMembersCsvInput"
+          ref={cancelMembersFileInputRef}
+          type="file"
+          accept=".csv,text/csv"
+          data-import-handler="cancelMembers"
+          style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }}
+          onClick={(e) => { e.currentTarget.value = ""; }}
+          onChange={handleCancelMembersFileChange}
+        />
+        <span style={{ fontSize: 12, color: "var(--ink-faint)", alignSelf: "center" }}>または下に貼り付け</span>
+      </div>
+      <textarea className="f4h-input" rows={4} placeholder="メンバー一覧（退会）CSVの内容をここに貼り付け..."
+        style={{ resize: "vertical", fontFamily: "monospace", fontSize: 12 }}
+        value={cancelMembersCsvText} onChange={(e) => {
+          setCancelMembersCsvText(e.target.value);
+          setCancelMembersSelectedFile(null);
+          setCancelMembersFileName("貼り付け入力");
+          setCancelMembersImportStats(null);
+          setCancelMembersImportError("");
+        }} />
+      <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "8px 16px" }} onClick={importCancelMembersCsv}>
+          読み込む
+        </button>
+        <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} disabled={!cancelMembersCsvText && !cancelMembersSelectedFile && !cancelMembersImportStats && !cancelMembersImportError} onClick={reset}>
+          <X size={13} /> リセット
+        </button>
+      </div>
+      <div style={{ marginTop: 10, display: "flex", gap: 14, fontSize: 12.5, color: "var(--ink-soft)", flexWrap: "wrap" }}>
+        <CounselingStatLine label="選択中ファイル名" value={cancelMembersFileName || "—"} />
+        <CounselingStatLine label="CSV本文文字数" value={`${cancelMembersCsvText.length}文字`} />
+        <CounselingStatLine label="selectedFile" value={cancelMembersSelectedFile ? "あり" : "なし"} />
+        <CounselingStatLine label="handler" value="cancelMembers" />
+      </div>
+      {cancelMembersImportError && !cancelMembersImportStats && (
+        <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginTop: 10 }}>
+          <AlertTriangle size={14} /> {cancelMembersImportError}
+        </div>
+      )}
+      {cancelMembersImportStats && (
+        <div className="f4h-fade-in" style={{ marginTop: 18, borderTop: "1px solid var(--border-soft)", paddingTop: 16 }}>
+          <div style={{ display: "flex", gap: 14, fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 8, flexWrap: "wrap" }}>
+            <CounselingStatLine label="CSV本文文字数" value={`${cancelMembersImportStats.stats.csvCharCount || 0}文字`} />
+            <CounselingStatLine label="parse後総行数" value={`${cancelMembersImportStats.stats.parsedRowCount || 0}件`} />
+            <CounselingStatLine label="今回取込の総行数" value={`${cancelMembersImportStats.stats.rowCount}件`} />
+            <CounselingStatLine label="有効件数" value={`${cancelMembersImportStats.stats.validCount}件`} />
+            <CounselingStatLine label="メンバーID空欄除外" value={`${cancelMembersImportStats.stats.blankMemberIdCount}件`} />
+            <CounselingStatLine label="メンバーID重複" value={`${cancelMembersImportStats.stats.duplicateMemberIdCount}件`} />
+            <CounselingStatLine label="利用開始日不明" value={`${cancelMembersImportStats.stats.unknownStartDateCount || 0}件`} />
+            <CounselingStatLine label="退会月不明" value={`${cancelMembersImportStats.stats.unknownCancelMonthCount || 0}件`} />
+            <span>ファイル <b>{cancelMembersImportStats.filename}</b></span>
+          </div>
+          <div style={{ fontSize: 12, color: "var(--ink-faint)", marginBottom: 10, lineHeight: 1.6 }}>
+            検出したヘッダー列名: {cancelMembersImportStats.stats.headerFields?.length ? cancelMembersImportStats.stats.headerFields.join(" / ") : "—"}
+          </div>
+          {cancelMembersImportStats.message && (
+            <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginBottom: 10 }}>
+              <AlertTriangle size={14} /> {cancelMembersImportStats.message}
+            </div>
+          )}
+          {cancelMembersImportStats.rows.length === 0 ? (
+            <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginBottom: 10 }}>
+              <AlertTriangle size={14} /> 保存対象の退会者データが見つかりません。
+            </div>
+          ) : (
+            <>
+              <div className="scrollbar-thin" style={{ maxHeight: 220, overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8, marginBottom: 12 }}>
+                <table className="f4h-table">
+                  <thead><tr><th>メンバーID</th><th>氏名</th><th>店舗</th><th>退会月</th><th>プラン終了日</th><th>利用開始日</th><th>入会日時</th><th>契約プラン</th></tr></thead>
+                  <tbody>
+                    {cancelMembersImportStats.rows.slice(0, 50).map((r) => (
+                      <tr key={r.memberId}>
+                        <td>{r.memberId}</td>
+                        <td style={{ textAlign: "left" }}>{r.name || "—"}</td>
+                        <td style={{ textAlign: "left" }}>{r.store || "—"}</td>
+                        <td>{r.cancelMonth || "—"}</td>
+                        <td>{r.planEndDate || "—"}</td>
+                        <td>{r.startDate || "—"}</td>
+                        <td>{r.joinDate || "—"}</td>
+                        <td style={{ textAlign: "left" }}>{r.planName || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "9px 18px" }} onClick={handleImport}>
+                <Check size={15} /> 退会者 {cancelMembersImportStats.rows.length}件を保存する
+              </button>
+            </>
+          )}
+        </div>
+      )}
+      <div style={{ marginTop: 14, fontSize: 12.5, color: "var(--ink-soft)" }}>
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+          <CounselingStatLine label="保存済み退会者データ 合計" value={`${cancelMembers.length}件`} />
+          <CounselingStatLine label="最終取込日時" value={cancelMembersMeta.importedAt ? new Date(cancelMembersMeta.importedAt).toLocaleString("ja-JP") : "—"} />
+          <CounselingStatLine label="直近取込ファイル名" value={cancelMembersMeta.filename || "—"} />
+          <CounselingStatLine label="今回取込の総行数" value={`${cancelMembersMeta.rowCount || 0}件`} />
+          <CounselingStatLine label="有効件数" value={`${cancelMembersMeta.validCount || cancelMembers.length || 0}件`} />
+          <CounselingStatLine label="メンバーID空欄除外" value={`${cancelMembersMeta.blankMemberIdCount || 0}件`} />
+          <CounselingStatLine label="重複除外/上書き" value={`${cancelMembersMeta.duplicateMemberIdCount || 0}件`} />
+          <CounselingStatLine label="退会月不明" value={`${cancelMembersMeta.unknownCancelMonthCount || 0}件`} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CounselingKpiCard({ label, value, sub }) {
   return (
     <div className="f4h-card" style={{ padding: 14, minHeight: 86 }}>
@@ -4162,6 +4526,119 @@ function NewMemberCounselingProgressSection({ data }) {
   );
 }
 
+function CancelMemberCounselingProgressSection({ data }) {
+  const [storeFilter, setStoreFilter] = useState("all");
+  const [periodMode, setPeriodMode] = useState("all");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
+  const period = useMemo(() => newMemberPeriodRange(periodMode, customStart, customEnd), [periodMode, customStart, customEnd]);
+  const progressRows = useMemo(
+    () => buildCancelMemberCounselingProgress(data.counselingCancelMembers, data.counselingReservations),
+    [data.counselingCancelMembers, data.counselingReservations]
+  );
+  const filteredRows = useMemo(() => progressRows.filter((row) => {
+    if (storeFilter !== "all" && row.store !== storeFilter) return false;
+    return isInDateRange(row.planEndDate, period);
+  }), [progressRows, storeFilter, period]);
+  const total = filteredRows.length;
+  const stageCounts = [0, 1, 2, 3, 4].map((stage) => (
+    stage === 4 ? filteredRows.filter((row) => row.checkedStage >= 4).length : filteredRows.filter((row) => row.checkedStage === stage).length
+  ));
+  const reached3 = filteredRows.filter((row) => row.checkedStage >= 3).length;
+  const under3 = filteredRows.filter((row) => row.checkedStage < 3).length;
+  const under4 = filteredRows.filter((row) => row.checkedStage < 4).length;
+
+  return (
+    <div className="f4h-card" style={{ padding: 18 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap", marginBottom: 14 }}>
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink-faint)", letterSpacing: ".05em", marginBottom: 4 }}>退会者分析</div>
+          <div style={{ fontSize: 20, fontWeight: 800 }}>退会者のカウンセリング進捗</div>
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <Pill active={storeFilter === "all"} onClick={() => setStoreFilter("all")}>全店</Pill>
+          {STORE_KEYS.map((store) => (
+            <Pill key={store} active={storeFilter === store} onClick={() => setStoreFilter(store)}>{store}</Pill>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+        {[
+          ["all", "全期間"], ["current", "当月"], ["previous", "前月"], ["last3", "直近3ヶ月"], ["last6", "直近6ヶ月"], ["custom", "期間指定"],
+        ].map(([key, label]) => (
+          <Pill key={key} active={periodMode === key} onClick={() => setPeriodMode(key)}>{label}</Pill>
+        ))}
+        {periodMode === "custom" && (
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            <input className="f4h-input" type="date" style={{ width: 150, padding: "6px 8px" }} value={customStart} onChange={(e) => setCustomStart(e.target.value)} />
+            <span style={{ color: "var(--ink-faint)", fontSize: 12 }}>〜</span>
+            <input className="f4h-input" type="date" style={{ width: 150, padding: "6px 8px" }} value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} />
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(132px, 1fr))", gap: 10, marginBottom: 14 }}>
+        <CounselingKpiCard label="退会者数" value={`${num(total)}人`} sub={period.label} />
+        <CounselingKpiCard label="0回" value={`${num(stageCounts[0])}人`} />
+        <CounselingKpiCard label="1回" value={`${num(stageCounts[1])}人`} />
+        <CounselingKpiCard label="2回" value={`${num(stageCounts[2])}人`} />
+        <CounselingKpiCard label="3回" value={`${num(stageCounts[3])}人`} />
+        <CounselingKpiCard label="4回目以降" value={`${num(stageCounts[4])}人`} />
+        <CounselingKpiCard label="3回目到達率" value={total ? pct1(reached3 / total) : "—"} />
+        <CounselingKpiCard label="3回未満人数" value={`${num(under3)}人`} />
+        <CounselingKpiCard label="4回目以降未到達人数" value={`${num(under4)}人`} />
+      </div>
+
+      <p style={{ fontSize: 12.5, color: "var(--ink-faint)", lineHeight: 1.7, margin: "0 0 14px" }}>
+        退会者は「プラン契約適用終了日」を退会月として集計しています。利用開始日は、同じメンバーIDが新規入会CSVに存在する場合は新規入会CSVの利用開始日を優先し、存在しない場合は退会CSVの「入会日時」を使います。退会CSVの「プラン契約適用開始日」は、プラン変更などで更新される可能性があるため利用開始日には使いません。「最終カウンセリング日」は、自由枠：予約一覧のカウンセリング系予約でチェックインした最新受講日です。無料スタジオレッスン等の最終受講日は含みません。
+      </p>
+
+      {filteredRows.length === 0 ? (
+        <EmptyState title="退会者データがありません" sub="メンバー一覧（退会）CSVを取り込むと、予約一覧CSVとメンバーIDで突合して表示します。" />
+      ) : (
+        <div className="scrollbar-thin" style={{ overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8 }}>
+          <table className="f4h-table">
+            <thead>
+              <tr>
+                <th>メンバーID</th><th>氏名</th><th>店舗</th><th>退会月</th><th>プラン契約適用終了日</th><th>利用開始日</th><th>利用開始月</th><th>入会日時</th>
+                <th>受講済み到達段階</th><th>予約込み到達段階</th><th>最終カウンセリング日</th><th>次回必要カウンセリング</th>
+                <th>初回カウンセリング日</th><th>2回目カウンセリング日</th><th>3回目カウンセリング日</th><th>4回目以降カウンセリング日</th>
+                <th>最終カウンセリング名</th><th>最終カウンセリング開始時刻</th><th>最終カウンセリング担当スタッフ</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredRows.map((row) => (
+                <tr key={row.memberId}>
+                  <td>{row.memberId}</td>
+                  <td style={{ textAlign: "left" }}>{row.name || "—"}</td>
+                  <td style={{ textAlign: "left" }}>{row.store || "—"}</td>
+                  <td>{row.cancelMonth || "—"}</td>
+                  <td>{row.planEndDate || "—"}</td>
+                  <td>{row.startDate || "—"}</td>
+                  <td>{row.startMonth || "—"}</td>
+                  <td>{row.joinDate || "—"}</td>
+                  <td>{counselingStageLabel(row.checkedStage)}</td>
+                  <td>{counselingStageLabel(row.reservedStage)}</td>
+                  <td>{row.finalCounselingDate || "—"}</td>
+                  <td style={{ textAlign: "left" }}>{row.nextCounseling}</td>
+                  <td>{row.firstCounselingDate || "—"}</td>
+                  <td>{row.secondCounselingDate || "—"}</td>
+                  <td>{row.thirdCounselingDate || "—"}</td>
+                  <td>{row.fourthPlusCounselingDate || "—"}</td>
+                  <td style={{ textAlign: "left" }}>{row.finalCounselingName || "—"}</td>
+                  <td>{row.finalCounselingStartTime || "—"}</td>
+                  <td style={{ textAlign: "left" }}>{row.finalCounselingStaffName || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CounselingAnalysisView({ data, updateData, showToast }) {
   const [csvText, setCsvText] = useState("");
   const [preview, setPreview] = useState(null);
@@ -4345,6 +4822,8 @@ function CounselingAnalysisView({ data, updateData, showToast }) {
       <ActiveCounselingProgressSection data={data} />
       <NewMemberImportPanel data={data} updateData={updateData} showToast={showToast} />
       <NewMemberCounselingProgressSection data={data} />
+      <CancelMemberImportPanel data={data} updateData={updateData} showToast={showToast} />
+      <CancelMemberCounselingProgressSection data={data} />
     </div>
   );
 }
@@ -4857,6 +5336,7 @@ export default function App() {
     counselingMeta: normalizeCounselingMeta(null),
     counselingActiveMembers: [],
     counselingNewMembers: [],
+    counselingCancelMembers: [],
   }));
   const [syncing, setSyncing] = useState(true);
   const [nav, setNav] = useState("dashboard");
@@ -4908,6 +5388,7 @@ export default function App() {
       counselingMeta: normalizeCounselingMeta(null),
       counselingActiveMembers: [],
       counselingNewMembers: [],
+      counselingCancelMembers: [],
     };
     await Promise.all(Object.keys(empty).map((k) => sSet(SK[k], empty[k])));
     await sSet(SK.meta, { initialized: true, seededAt: new Date().toISOString(), version: 1, resetAt: new Date().toISOString() });
