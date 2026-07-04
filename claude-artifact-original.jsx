@@ -3376,6 +3376,8 @@ function CancellationImportPanel({ data, updateData, showToast }) {
   const fileRef = useRef(null);
   const current = normalizeCancellations(data.cancellations || { rows: [], imports: {}, importedAt: null, source: null });
   const currentMonthCounts = monthlyCancellationCounts(current.rows);
+  const counselingCancelMembers = normalizeCounselingCancelMembers(data.counselingCancelMembers);
+  const counselingCancelMembersMeta = normalizeCounselingCancelMembersMeta(data.counselingCancelMembers);
 
   const reset = () => {
     setCsvText("");
@@ -3392,11 +3394,14 @@ function CancellationImportPanel({ data, updateData, showToast }) {
       complete: (res) => {
         const rawRows = res.data || [];
         const parsed = parseCancellationRows(rawRows);
+        const counselingParsed = parseCounselingCancelMembers(rawRows, data.counselingNewMembers);
         setPreview({
           rows: parsed.rows,
           skipped: parsed.skipped,
           rawMonthCounts: parsed.rawMonthCounts,
           validMonthCounts: parsed.validMonthCounts,
+          counselingRows: counselingParsed.rows,
+          counselingStats: counselingParsed.stats,
           source: {
             filename: name || "貼り付けCSV",
             rowCount: rawRows.length,
@@ -3406,7 +3411,7 @@ function CancellationImportPanel({ data, updateData, showToast }) {
       },
       error: () => showToast("CSVの解析に失敗しました。", true),
     });
-  }, [showToast]);
+  }, [data.counselingNewMembers, showToast]);
 
   const onFile = useCallback((e) => {
     const f = e.target.files?.[0];
@@ -3436,8 +3441,22 @@ function CancellationImportPanel({ data, updateData, showToast }) {
       rawMonthCounts: preview.rawMonthCounts,
       validMonthCounts: preview.validMonthCounts,
     };
+    const counselingRows = preview.counselingRows || [];
+    if (!counselingRows.length) {
+      showToast("カウンセリング分析用の退会者データを作成できませんでした。CSVのメンバーIDとプラン契約適用終了日を確認してください。", true);
+      return;
+    }
     await updateData("cancellations", (cur) => mergeCancellationImport(cur, payloadInput, preview.source));
-    showToast(`退会者明細 ${preview.rows.length}件を保存しました`);
+    await updateData("counselingCancelMembers", (cur) => (
+      mergeCounselingMemberMonthImport(
+        cur,
+        counselingRows,
+        preview.counselingStats,
+        preview.source?.filename,
+        counselingCancelMemberMonthOf
+      )
+    ));
+    showToast(`退会者データ ${preview.rows.length}件を保存し、カウンセリング分析用退会者データ ${counselingRows.length}件も更新しました`);
     reset();
   };
 
@@ -3474,6 +3493,7 @@ function CancellationImportPanel({ data, updateData, showToast }) {
             <div style={{ display: "flex", gap: 14, fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 8, flexWrap: "wrap" }}>
               <span>総行数 <b className="num">{preview.source.rowCount}</b>件</span>
               <span>有効件数 <b className="num" style={{ color: "var(--go)" }}>{preview.source.validCount}</b>件</span>
+              <span>カウンセリング反映 <b className="num" style={{ color: "var(--go)" }}>{preview.counselingRows?.length || 0}</b>件</span>
               <span>スキップ <b className="num" style={{ color: "var(--ink-faint)" }}>{preview.skipped}</b>件</span>
               <span>ファイル <b>{preview.source.filename}</b></span>
             </div>
@@ -3514,9 +3534,11 @@ function CancellationImportPanel({ data, updateData, showToast }) {
         <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>保存済み退会者明細</div>
         <div style={{ display: "flex", gap: 18, flexWrap: "wrap", fontSize: 12.5, color: "var(--ink-soft)" }}>
           <span>退会者明細 <b className="num">{current.rows?.length || 0}</b>件</span>
+          <span>カウンセリング分析用退会者データ <b className="num">{counselingCancelMembers.length}</b>件</span>
           <span>最終取込日時 <b>{current.importedAt ? new Date(current.importedAt).toLocaleString("ja-JP") : "—"}</b></span>
           <span>元ファイル名 <b>{current.source?.filename || "—"}</b></span>
           <span>有効件数 / 総行数 <b className="num">{current.source?.validCount ?? 0}</b> / <b className="num">{current.source?.rowCount ?? 0}</b></span>
+          <span>カウンセリング側最終取込 <b>{(counselingCancelMembersMeta.importedAt || counselingCancelMembersMeta.lastImportedAt) ? new Date(counselingCancelMembersMeta.importedAt || counselingCancelMembersMeta.lastImportedAt).toLocaleString("ja-JP") : "—"}</b></span>
         </div>
         <div style={{ marginTop: 12, display: "grid", gap: 6 }}>
           <div style={{ fontSize: 12, color: "var(--ink-soft)", fontWeight: 700 }}>登録済み月</div>
@@ -3916,7 +3938,19 @@ function CounselingDataImportSection({ data, updateData, showToast }) {
       <CounselingReservationImportPanel data={data} updateData={updateData} showToast={showToast} />
       <ActiveMemberImportPanel data={data} updateData={updateData} showToast={showToast} />
       <NewMemberImportPanel data={data} updateData={updateData} showToast={showToast} />
-      <CancelMemberImportPanel data={data} updateData={updateData} showToast={showToast} />
+      <div className="f4h-card" style={{ padding: 18 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+          <Upload size={16} /><div style={{ fontWeight: 700, fontSize: 14 }}>メンバー一覧（退会）CSV</div>
+        </div>
+        <p style={{ fontSize: 12.5, color: "var(--ink-faint)", margin: "2px 0 12px", lineHeight: 1.7 }}>
+          退会者CSVは「退会者CSV」タブから取り込むと、退会分析とカウンセリング分析の両方に反映されます。
+        </p>
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 12.5, color: "var(--ink-soft)" }}>
+          <CounselingStatLine label="カウンセリング分析用退会者データ" value={`${cancelMembers.length}件`} />
+          <CounselingStatLine label="最終取込日時" value={metaTime(cancelMembersMeta.importedAt || cancelMembersMeta.lastImportedAt)} />
+          <CounselingStatLine label="直近取込ファイル名" value={cancelMembersMeta.filename || cancelMembersMeta.lastFileName || "—"} />
+        </div>
+      </div>
     </div>
   );
 }
