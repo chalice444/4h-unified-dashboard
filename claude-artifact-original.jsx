@@ -1649,6 +1649,238 @@ function cancellationRowsForStore(rows, storeFilter) {
 function cancellationRowsAsSingleMonth(rows) {
   return rows.map((row) => ({ ...row, cancellationMonth: "2000-01" }));
 }
+const CANCELLATION_SURVEY_ENVIRONMENT_REASONS = [
+  "転居・転勤",
+  "ケガ・病気",
+  "妊娠",
+  "仕事が忙しいため",
+  "家庭の事情（子育て・介護）",
+  "在宅勤務が減り、時間がつくりにくい",
+  "営業時間が合わない",
+  "自宅・勤務地から遠い",
+  "その他",
+];
+const CANCELLATION_SURVEY_SERVICE_REASONS = [
+  "自分に合った運動ができなかった",
+  "思ったより短い時間で効率的な運動ができなかった",
+  "マシンの使い方が分からなかった",
+  "必要なときにスタッフに相談できなかった",
+  "運動の成果が感じられなかった",
+  "目標達成のための専門的なアドバイスが得られなかった",
+  "飽きた",
+  "一人では続けられなかった",
+  "混雑によるストレス",
+  "人間関係のトラブルがあった",
+  "目標を達成した",
+  "運動習慣がついたので自分で頑張ってみる",
+  "他のジム・スポーツクラブに切り替える",
+  "スタッフの対応で気になる点があった",
+  "その他",
+];
+const CANCELLATION_SURVEY_AGE_FILTERS = [
+  { key: "all", label: "全年代" },
+  { key: "10代以下", label: "10代以下" },
+  { key: "20代", label: "20代" },
+  { key: "30代", label: "30代" },
+  { key: "40代", label: "40代" },
+  { key: "50代", label: "50代" },
+  { key: "60代以上", label: "60代以上" },
+];
+const CANCELLATION_SURVEY_AGE_ROWS = ["10代以下", "20代", "30代", "40代", "50代", "60代以上", "年齢不明"];
+function emptyCancellationSurvey() {
+  return { rows: [], imports: [], meta: { lastImportedAt: null, lastFileName: null, rowCount: 0, validCount: 0, registeredMonths: [] } };
+}
+function normalizeCancellationSurvey(value) {
+  if (Array.isArray(value)) return { ...emptyCancellationSurvey(), rows: value };
+  if (!value || typeof value !== "object") return emptyCancellationSurvey();
+  const rows = Array.isArray(value.rows) ? value.rows : [];
+  const imports = Array.isArray(value.imports) ? value.imports : [];
+  return { rows, imports, meta: { ...emptyCancellationSurvey().meta, ...(value.meta || {}) } };
+}
+function cancellationSurveyStoreFromCode(codeRaw) {
+  const code = String(codeRaw || "").trim().toUpperCase();
+  if (code === "S0001") return "梅ヶ丘";
+  if (code === "S0002") return "狛江";
+  return "不明";
+}
+function cancellationSurveyAgeBand(age) {
+  if (age == null || age === "") return "年齢不明";
+  const n = Number(age);
+  if (!Number.isFinite(n)) return "年齢不明";
+  if (n < 20) return "10代以下";
+  if (n < 30) return "20代";
+  if (n < 40) return "30代";
+  if (n < 50) return "40代";
+  if (n < 60) return "50代";
+  return "60代以上";
+}
+function cancellationSurveyHasAnswer(value) {
+  const s = String(value ?? "").trim();
+  return s !== "" && s.toLowerCase() !== "nan";
+}
+function cancellationSurveyReasonFromHeader(header) {
+  const h = String(header || "").trim();
+  const idx = h.lastIndexOf("_");
+  return idx >= 0 ? h.slice(idx + 1).trim() : "";
+}
+function cancellationSurveyReasonColumns(row, type) {
+  return Object.keys(row || {}).filter((key) => {
+    const h = String(key || "").trim();
+    if (type === "environment") return h.startsWith("退会される理由は何ですか？（環境要因）_") || (h.includes("退会される理由") && h.includes("環境要因") && h.includes("_"));
+    return h.startsWith("上記の環境要因がなくても退会を考えていた場合は、その理由を教えてください。") || (h.includes("環境要因がなくても退会を考えていた場合") && h.includes("理由") && h.includes("_"));
+  });
+}
+function cancellationSurveySelectedReasons(row, type, preferredOrder) {
+  const selected = [];
+  for (const key of cancellationSurveyReasonColumns(row, type)) {
+    if (!cancellationSurveyHasAnswer(row[key])) continue;
+    const reason = cancellationSurveyReasonFromHeader(key) || String(row[key]).trim();
+    if (reason && !selected.includes(reason)) selected.push(reason);
+  }
+  return [...selected].sort((a, b) => {
+    const ai = preferredOrder.indexOf(a);
+    const bi = preferredOrder.indexOf(b);
+    if (ai >= 0 && bi >= 0) return ai - bi;
+    if (ai >= 0) return -1;
+    if (bi >= 0) return 1;
+    return a.localeCompare(b, "ja");
+  });
+}
+function cancellationSurveyMailAllowed(value) {
+  const s = String(value || "").trim();
+  if (!s || /いいえ|不可|不要|拒否|希望しない/.test(s)) return false;
+  return /はい|可|許可|希望|送/.test(s);
+}
+function sanitizeCancellationSurveyRaw(row) {
+  return Object.fromEntries(Object.entries(row || {}).filter(([key]) => !String(key).includes("メールアドレス")));
+}
+function cancellationSurveyDedupKey(row) {
+  const memberId = normalizeMemberId(rowValue(row, ["メンバー_ID", "メンバーID", "メンバー ID"]));
+  const registeredAt = String(rowValue(row, ["登録日時"]) || "").trim();
+  if (memberId && registeredAt) return `${memberId}__${registeredAt}`;
+  const code = String(rowValue(row, ["コード"]) || "").trim();
+  const name = String(rowValue(row, ["メンバー_氏名", "氏名", "名称"]) || "").trim();
+  if (code || registeredAt || name) return `${code}__${registeredAt || ""}__${name}`;
+  return "";
+}
+function monthlyCancellationSurveyCounts(rows) {
+  const counts = {};
+  for (const row of rows || []) {
+    if (!row.registeredMonth) continue;
+    counts[row.registeredMonth] = (counts[row.registeredMonth] || 0) + 1;
+  }
+  return Object.entries(counts).map(([ym, count]) => ({ ym, count })).sort((a, b) => b.ym.localeCompare(a.ym));
+}
+function parseCancellationSurveyRows(rawRows, filename = "") {
+  const map = new Map();
+  let skipped = 0;
+  for (const row of rawRows || []) {
+    const key = cancellationSurveyDedupKey(row);
+    if (!key) {
+      skipped += 1;
+      continue;
+    }
+    const storeRaw = String(rowValue(row, ["店舗コード"]) || "").trim();
+    const registeredAt = String(rowValue(row, ["登録日時"]) || "").trim();
+    const registeredDate = parseFlexibleDate(registeredAt);
+    const age = Number(rowValue(row, ["メンバー_年齢", "年齢"])) || null;
+    map.set(key, {
+      memberId: normalizeMemberId(rowValue(row, ["メンバー_ID", "メンバーID", "メンバー ID"])),
+      memberName: String(rowValue(row, ["メンバー_氏名", "氏名", "名称"]) || "").trim(),
+      gender: String(rowValue(row, ["メンバー_性別", "性別"]) || "").trim(),
+      age,
+      registeredAt,
+      registeredMonth: monthOfIsoDate(registeredDate),
+      storeRaw,
+      store: cancellationSurveyStoreFromCode(storeRaw),
+      environmentReasons: cancellationSurveySelectedReasons(row, "environment", CANCELLATION_SURVEY_ENVIRONMENT_REASONS),
+      serviceReasons: cancellationSurveySelectedReasons(row, "service", CANCELLATION_SURVEY_SERVICE_REASONS),
+      freeText: String(rowValue(row, ["その他（自由記述）"]) || "").trim(),
+      detailText: String(rowValue(row, ["「スタッフの対応で気になる点があった」「その他」を選択した方へ　具体的な内容を教えてください。", "スタッフの対応で気になる点があった", "具体的な内容を教えてください"]) || "").trim(),
+      mailPermission: String(rowValue(row, ["今後、再入会や健康増進イベント等の案内をメールでお送りしてもよろしいですか？", "再入会や健康増進イベント"]) || "").trim(),
+      raw: sanitizeCancellationSurveyRaw(row),
+    });
+  }
+  const rows = [...map.values()];
+  const registeredMonths = monthlyCancellationSurveyCounts(rows);
+  return {
+    rows,
+    skipped,
+    meta: {
+      lastImportedAt: new Date().toISOString(),
+      lastFileName: filename || "貼り付け入力",
+      rowCount: rawRows?.length || 0,
+      validCount: rows.length,
+      registeredMonths,
+    },
+  };
+}
+function replaceCancellationSurveyImport(parsed) {
+  return {
+    rows: parsed.rows || [],
+    imports: [{ ...(parsed.meta || {}), importedAt: parsed.meta?.lastImportedAt }],
+    meta: parsed.meta || emptyCancellationSurvey().meta,
+  };
+}
+function cancellationSurveyPeriodFromMode(mode, customStartYm, customEndYm, rows) {
+  const today = todayParts();
+  const currentYm = cancellationYm(today.year, today.month);
+  const currentIdx = cancellationYmIndex(currentYm);
+  const previousYm = cancellationYmFromIndex(currentIdx - 1);
+  const rowMonths = monthlyCancellationSurveyCounts(rows).map((r) => r.ym).sort();
+  const allStart = rowMonths[0] || currentYm;
+  const allEnd = rowMonths[rowMonths.length - 1] || currentYm;
+  if (mode === "all") return { mode, startYm: allStart, endYm: allEnd, months: cancellationPeriodMonths(allStart, allEnd), label: "全期間" };
+  if (mode === "previous") return { mode, startYm: previousYm, endYm: previousYm, months: [previousYm], label: cancellationMonthLabel(previousYm) };
+  if (mode === "recent3" || mode === "recent6") {
+    const size = mode === "recent3" ? 3 : 6;
+    const startYm = cancellationYmFromIndex(currentIdx - (size - 1));
+    return { mode, startYm, endYm: currentYm, months: cancellationPeriodMonths(startYm, currentYm), label: `${cancellationMonthLabel(startYm)}〜${cancellationMonthLabel(currentYm)}` };
+  }
+  if (mode === "custom") {
+    const start = customStartYm || allStart;
+    const end = customEndYm || customStartYm || allEnd;
+    const startIdx = cancellationYmIndex(start);
+    const endIdx = cancellationYmIndex(end);
+    const startYm = startIdx != null && endIdx != null && startIdx > endIdx ? end : start;
+    const endYm = startIdx != null && endIdx != null && startIdx > endIdx ? start : end;
+    return { mode, startYm, endYm, months: cancellationPeriodMonths(startYm, endYm), label: startYm === endYm ? cancellationMonthLabel(startYm) : `${cancellationMonthLabel(startYm)}〜${cancellationMonthLabel(endYm)}` };
+  }
+  return { mode: "current", startYm: currentYm, endYm: currentYm, months: [currentYm], label: cancellationMonthLabel(currentYm) };
+}
+function cancellationSurveyRowsInPeriod(rows, period) {
+  if (period.mode === "all") return rows;
+  const start = cancellationYmIndex(period.startYm);
+  const end = cancellationYmIndex(period.endYm);
+  return rows.filter((row) => {
+    const idx = cancellationYmIndex(row.registeredMonth);
+    return idx != null && idx >= start && idx <= end;
+  });
+}
+function cancellationSurveyRowsForStore(rows, storeFilter) {
+  if (!storeFilter || storeFilter === "all") return rows;
+  return rows.filter((row) => row.store === storeFilter);
+}
+function cancellationSurveyRowsForAge(rows, ageFilter) {
+  if (!ageFilter || ageFilter === "all") return rows;
+  return rows.filter((row) => cancellationSurveyAgeBand(row.age) === ageFilter);
+}
+function cancellationSurveyReasonRanking(rows, reasons, field) {
+  const counts = Object.fromEntries(reasons.map((reason) => [reason, 0]));
+  for (const row of rows || []) {
+    for (const reason of row[field] || []) counts[reason] = (counts[reason] || 0) + 1;
+  }
+  return Object.entries(counts)
+    .map(([reason, count]) => ({ reason, count, rate: rows.length ? count / rows.length : null }))
+    .sort((a, b) => (b.count - a.count) || a.reason.localeCompare(b.reason, "ja"));
+}
+function cancellationSurveyTopReasons(rows, limit = 3) {
+  const counts = {};
+  for (const row of rows || []) {
+    for (const reason of [...(row.environmentReasons || []), ...(row.serviceReasons || [])]) counts[reason] = (counts[reason] || 0) + 1;
+  }
+  return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, limit).map(([reason, count]) => `${reason}（${num(count)}件）`);
+}
 function weeklyCancellationRequestRowsForPeriod(rows, period) {
   if (period.months.length === 1) {
     const [year, month] = period.months[0].split("-").map(Number);
@@ -1720,6 +1952,7 @@ const SK = {
   memberMonthly: "memberMonthly", baselines: "baselines",
   budgetTargets: "budgetTargets", revenueActuals: "revenueActuals", settings: "settings",
   cancellations: "cancellations",
+  cancellationSurvey: "cancellationSurvey",
   counselingReservations: "counseling:reservations",
   counselingMeta: "counseling:meta",
   counselingActiveMembers: "counseling:activeMembers",
@@ -1763,10 +1996,10 @@ async function ensureSeeded() {
   return true;
 }
 async function loadAllData() {
-  const [staff, trials, joins, memberMonthly, baselines, budgetTargets, revenueActuals, settings, cancellations, counselingReservations, counselingMeta, counselingActiveMembers, counselingNewMembers, counselingCancelMembers] = await Promise.all([
+  const [staff, trials, joins, memberMonthly, baselines, budgetTargets, revenueActuals, settings, cancellations, cancellationSurvey, counselingReservations, counselingMeta, counselingActiveMembers, counselingNewMembers, counselingCancelMembers] = await Promise.all([
     sGet(SK.staff), sGet(SK.trials), sGet(SK.joins), sGet(SK.memberMonthly),
     sGet(SK.baselines), sGet(SK.budgetTargets), sGet(SK.revenueActuals), sGet(SK.settings),
-    sGet(SK.cancellations), sGet(SK.counselingReservations), sGet(SK.counselingMeta), sGet(SK.counselingActiveMembers), sGet(SK.counselingNewMembers), sGet(SK.counselingCancelMembers),
+    sGet(SK.cancellations), sGet(SK.cancellationSurvey), sGet(SK.counselingReservations), sGet(SK.counselingMeta), sGet(SK.counselingActiveMembers), sGet(SK.counselingNewMembers), sGet(SK.counselingCancelMembers),
   ]);
   return {
     staff: staff || SEED_DATA.staff,
@@ -1778,6 +2011,7 @@ async function loadAllData() {
     revenueActuals: revenueActuals || SEED_DATA.revenueActuals,
     settings: settings || SEED_DATA.settings,
     cancellations: cancellations || { rows: [], importedAt: null, source: null },
+    cancellationSurvey: normalizeCancellationSurvey(cancellationSurvey),
     counselingReservations: normalizeCounselingReservations(counselingReservations),
     counselingMeta: normalizeCounselingMeta(counselingMeta),
     counselingActiveMembers: counselingActiveMembers && typeof counselingActiveMembers === "object" && !Array.isArray(counselingActiveMembers)
@@ -2647,7 +2881,259 @@ function MonthlyReportView({ data }) {
   );
 }
 
+function CancellationSurveyKpiCard({ label, value, sub }) {
+  return (
+    <div className="f4h-card" style={{ padding: 14, display: "grid", gap: 7, minWidth: 0 }}>
+      <div style={{ fontSize: 11.5, color: "var(--ink-soft)", fontWeight: 800 }}>{label}</div>
+      <div className="num" style={{ fontSize: 25, fontWeight: 800, lineHeight: 1.1 }}>{value}</div>
+      <div style={{ fontSize: 11, color: "var(--ink-faint)", minHeight: 15 }}>{sub}</div>
+    </div>
+  );
+}
+function CancellationSurveyReasonCard({ title, rows, total }) {
+  const max = Math.max(1, ...rows.map((row) => row.count));
+  return (
+    <div className="f4h-card scrollbar-thin" style={{ padding: 16, overflowX: "auto" }}>
+      <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 10 }}>{title}</div>
+      <table className="f4h-table" style={{ fontSize: 12.5 }}>
+        <thead><tr><th>理由名</th><th>件数</th><th>回答者比率</th><th>グラフ</th></tr></thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.reason}>
+              <td style={{ textAlign: "left", fontWeight: 700 }}>{row.reason}</td>
+              <td className="num">{num(row.count)}件</td>
+              <td className="num">{pct1(row.rate)}</td>
+              <td style={{ minWidth: 180 }}>
+                <div style={{ height: 9, borderRadius: 99, background: "var(--bg-soft)", overflow: "hidden" }}>
+                  <div style={{ width: `${Math.round((row.count / max) * 100)}%`, height: "100%", borderRadius: 99, background: "var(--ink)" }} />
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div style={{ marginTop: 8, fontSize: 11, color: "var(--ink-faint)" }}>
+        比率は回答者数{num(total)}人に対する割合です。
+      </div>
+    </div>
+  );
+}
+function CancellationSurveyStoreComparison({ rows }) {
+  const reasons = [
+    ...CANCELLATION_SURVEY_ENVIRONMENT_REASONS.slice(0, 8),
+    ...CANCELLATION_SURVEY_SERVICE_REASONS.slice(0, 10),
+  ];
+  const storeRows = STORE_KEYS.map((store) => ({ store, rows: rows.filter((row) => row.store === store) }));
+  const comparisonRows = reasons.map((reason) => {
+    const rec = { reason };
+    for (const { store, rows: storeSurveyRows } of storeRows) {
+      const count = storeSurveyRows.filter((row) => [...(row.environmentReasons || []), ...(row.serviceReasons || [])].includes(reason)).length;
+      rec[store] = { count, rate: storeSurveyRows.length ? count / storeSurveyRows.length : null };
+    }
+    rec.total = STORE_KEYS.reduce((sum, store) => sum + (rec[store]?.count || 0), 0);
+    return rec;
+  }).filter((row) => row.total > 0).sort((a, b) => b.total - a.total).slice(0, 14);
+  return (
+    <div className="f4h-card scrollbar-thin" style={{ padding: 16, overflowX: "auto" }}>
+      <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 10 }}>店舗比較</div>
+      {comparisonRows.length === 0 ? (
+        <div style={{ fontSize: 12.5, color: "var(--ink-faint)" }}>比較できる回答がありません。</div>
+      ) : (
+        <table className="f4h-table" style={{ fontSize: 12.5 }}>
+          <thead><tr><th>理由名</th>{STORE_KEYS.map((store) => <th key={store}>{store}比率</th>)}</tr></thead>
+          <tbody>
+            {comparisonRows.map((row) => (
+              <tr key={row.reason}>
+                <td style={{ textAlign: "left", fontWeight: 700 }}>{row.reason}</td>
+                {STORE_KEYS.map((store) => (
+                  <td key={store} style={{ minWidth: 150 }}>
+                    <div style={{ display: "grid", gap: 4 }}>
+                      <div className="num" style={{ fontWeight: 800 }}>{pct1(row[store]?.rate)} <span style={{ color: "var(--ink-faint)", fontWeight: 600 }}>({num(row[store]?.count)}件)</span></div>
+                      <div style={{ height: 8, borderRadius: 99, background: "var(--bg-soft)", overflow: "hidden" }}>
+                        <div style={{ width: `${Math.round((row[store]?.rate || 0) * 100)}%`, height: "100%", background: STORE_COLOR[store], borderRadius: 99 }} />
+                      </div>
+                    </div>
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+function CancellationSurveyAgeReasonTable({ rows }) {
+  const ageRows = CANCELLATION_SURVEY_AGE_ROWS.map((label) => {
+    const groupRows = rows.filter((row) => cancellationSurveyAgeBand(row.age) === label);
+    const top = cancellationSurveyTopReasons(groupRows, 3);
+    return { label, count: groupRows.length, top };
+  });
+  return (
+    <div className="f4h-card scrollbar-thin" style={{ padding: 16, overflowX: "auto" }}>
+      <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 10 }}>年齢別退会理由</div>
+      <table className="f4h-table" style={{ fontSize: 12.5 }}>
+        <thead><tr><th>年齢帯</th><th>回答者数</th><th>1位理由</th><th>2位理由</th><th>3位理由</th></tr></thead>
+        <tbody>
+          {ageRows.map((row) => (
+            <tr key={row.label}>
+              <td style={{ fontWeight: 800 }}>{row.label}</td>
+              <td className="num">{num(row.count)}人</td>
+              <td style={{ textAlign: "left" }}>{row.top[0] || "—"}</td>
+              <td style={{ textAlign: "left" }}>{row.top[1] || "—"}</td>
+              <td style={{ textAlign: "left" }}>{row.top[2] || "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+function CancellationSurveyTextTable({ title, rows, permission = false }) {
+  return (
+    <div className="f4h-card scrollbar-thin" style={{ padding: 16, overflowX: "auto" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
+        <div style={{ fontWeight: 800, fontSize: 14 }}>{title}</div>
+        <CounselingStatLine label="対象" value={`${num(rows.length)}件`} />
+      </div>
+      {rows.length === 0 ? (
+        <div style={{ fontSize: 12.5, color: "var(--ink-faint)" }}>該当する回答はありません。</div>
+      ) : (
+        <table className="f4h-table" style={{ fontSize: 12.3 }}>
+          <thead>
+            <tr>
+              <th>登録日時</th><th>店舗</th><th>年齢</th><th>メンバーID</th><th>氏名</th>
+              {permission && <th>選択理由</th>}
+              <th>自由記述</th><th>詳細記述</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.slice(0, 120).map((row, index) => (
+              <tr key={`${row.memberId || row.memberName}-${row.registeredAt}-${index}`}>
+                <td>{row.registeredAt || "—"}</td>
+                <td>{row.store || "不明"}</td>
+                <td className="num">{row.age || "—"}</td>
+                <td>{row.memberId || "—"}</td>
+                <td style={{ textAlign: "left" }}>{row.memberName || "—"}</td>
+                {permission && <td style={{ textAlign: "left" }}>{[...(row.environmentReasons || []), ...(row.serviceReasons || [])].join(" / ") || "—"}</td>}
+                <td style={{ textAlign: "left", maxWidth: 360, whiteSpace: "normal" }}>{row.freeText || "—"}</td>
+                <td style={{ textAlign: "left", maxWidth: 420, whiteSpace: "normal" }}>{row.detailText || "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {rows.length > 120 && <div style={{ marginTop: 8, fontSize: 11, color: "var(--ink-faint)" }}>先頭120件を表示中（全{num(rows.length)}件）</div>}
+    </div>
+  );
+}
+function CancellationSurveyAnalysisView({ data }) {
+  const survey = normalizeCancellationSurvey(data.cancellationSurvey);
+  const rows = survey.rows;
+  const latestYm = monthlyCancellationSurveyCounts(rows)[0]?.ym || cancellationYm(todayParts().year, todayParts().month);
+  const [periodMode, setPeriodMode] = useState("all");
+  const [customStartYm, setCustomStartYm] = useState(latestYm);
+  const [customEndYm, setCustomEndYm] = useState(latestYm);
+  const [storeFilter, setStoreFilter] = useState("all");
+  const [ageFilter, setAgeFilter] = useState("all");
+  useEffect(() => {
+    setCustomStartYm((v) => v || latestYm);
+    setCustomEndYm((v) => v || latestYm);
+  }, [latestYm]);
+
+  const period = useMemo(() => cancellationSurveyPeriodFromMode(periodMode, customStartYm, customEndYm, rows), [periodMode, customStartYm, customEndYm, rows]);
+  const periodRows = useMemo(() => cancellationSurveyRowsInPeriod(rows, period), [rows, period]);
+  const storeRows = useMemo(() => cancellationSurveyRowsForStore(periodRows, storeFilter), [periodRows, storeFilter]);
+  const filteredRows = useMemo(() => cancellationSurveyRowsForAge(storeRows, ageFilter), [storeRows, ageFilter]);
+  const environmentRanking = useMemo(() => cancellationSurveyReasonRanking(filteredRows, CANCELLATION_SURVEY_ENVIRONMENT_REASONS, "environmentReasons"), [filteredRows]);
+  const serviceRanking = useMemo(() => cancellationSurveyReasonRanking(filteredRows, CANCELLATION_SURVEY_SERVICE_REASONS, "serviceReasons"), [filteredRows]);
+  const freeTextRows = filteredRows.filter((row) => row.freeText || row.detailText);
+  const permittedRows = filteredRows.filter((row) => cancellationSurveyMailAllowed(row.mailPermission));
+  const periodTabs = [
+    { key: "all", label: "全期間" },
+    { key: "current", label: "当月" },
+    { key: "previous", label: "前月" },
+    { key: "recent3", label: "直近3ヶ月" },
+    { key: "recent6", label: "直近半年" },
+    { key: "custom", label: "期間指定" },
+  ];
+  const startParts = customStartYm.split("-").map(Number);
+  const endParts = customEndYm.split("-").map(Number);
+  const storeFilterLabel = storeFilter === "all" ? "全店" : storeFilter;
+  const ageFilterLabel = CANCELLATION_SURVEY_AGE_FILTERS.find((item) => item.key === ageFilter)?.label || "全年代";
+  const envRespondents = filteredRows.filter((row) => row.environmentReasons?.length).length;
+  const serviceRespondents = filteredRows.filter((row) => row.serviceReasons?.length).length;
+
+  if (!rows.length) {
+    return (
+      <div className="f4h-card">
+        <EmptyState
+          icon={UserMinus}
+          title="退会者アンケートCSVがまだ取り込まれていません。"
+          sub="データ入力 > 退会者アンケートCSV からCSVを取り込むと、退会理由を分析できます。"
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div className="f4h-card" style={{ padding: 14, display: "grid", gap: 10 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          {periodTabs.map((tab) => (
+            <button key={tab.key} className={`f4h-btn f4h-focus ${periodMode === tab.key ? "f4h-btn-primary" : "f4h-btn-outline"}`} style={{ padding: "7px 12px", fontSize: 12.5 }} onClick={() => setPeriodMode(tab.key)}>
+              {tab.label}
+            </button>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ fontSize: 12, color: "var(--ink-faint)", fontWeight: 700 }}>店舗</span>
+          {[{ key: "all", label: "全店" }, ...STORE_KEYS.map((store) => ({ key: store, label: store }))].map((tab) => (
+            <Pill key={tab.key} active={storeFilter === tab.key} onClick={() => setStoreFilter(tab.key)}>{tab.label}</Pill>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ fontSize: 12, color: "var(--ink-faint)", fontWeight: 700 }}>年齢</span>
+          {CANCELLATION_SURVEY_AGE_FILTERS.map((tab) => (
+            <Pill key={tab.key} active={ageFilter === tab.key} onClick={() => setAgeFilter(tab.key)}>{tab.label}</Pill>
+          ))}
+        </div>
+        {periodMode === "custom" && (
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+            <span style={{ fontSize: 12, color: "var(--ink-faint)", fontWeight: 700 }}>開始</span>
+            <MonthPicker year={startParts[0]} month={startParts[1]} onChange={(y, m) => setCustomStartYm(cancellationYm(y, m))} />
+            <span style={{ fontSize: 12, color: "var(--ink-faint)", fontWeight: 700 }}>終了</span>
+            <MonthPicker year={endParts[0]} month={endParts[1]} onChange={(y, m) => setCustomEndYm(cancellationYm(y, m))} />
+          </div>
+        )}
+        <div style={{ fontSize: 11.5, color: "var(--ink-faint)", lineHeight: 1.7 }}>
+          登録日時ベースで絞り込み中：{period.label}・{storeFilterLabel}・{ageFilterLabel}。複数回答のため、理由別件数の合計は回答者数を上回る場合があります。
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12 }}>
+        <CancellationSurveyKpiCard label="回答者数" value={`${num(filteredRows.length)}人`} sub="選択条件内" />
+        <CancellationSurveyKpiCard label="環境要因回答数" value={`${num(envRespondents)}人`} sub="1つ以上選択" />
+        <CancellationSurveyKpiCard label="サービス要因回答数" value={`${num(serviceRespondents)}人`} sub="1つ以上選択" />
+        <CancellationSurveyKpiCard label="自由記述あり" value={`${num(freeTextRows.length)}人`} sub="自由記述または詳細記述" />
+        <CancellationSurveyKpiCard label="再アプローチ許可数" value={`${num(permittedRows.length)}人`} sub="メール案内許可" />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 12 }}>
+        <CancellationSurveyReasonCard title="退会理由：環境要因" rows={environmentRanking} total={filteredRows.length} />
+        <CancellationSurveyReasonCard title="退会理由：サービス・継続要因" rows={serviceRanking} total={filteredRows.length} />
+      </div>
+
+      <CancellationSurveyStoreComparison rows={periodRows} />
+      <CancellationSurveyAgeReasonTable rows={storeRows} />
+      <CancellationSurveyTextTable title="自由記述一覧" rows={freeTextRows} />
+      <CancellationSurveyTextTable title="再アプローチ許可者リスト" rows={permittedRows} permission />
+    </div>
+  );
+}
+
 function CancellationAnalysisView({ data }) {
+  const [analysisTab, setAnalysisTab] = useState("summary");
   const rows = useMemo(() => cancellationRowsOf(data), [data]);
   const latest = useMemo(() => latestCancellationYearMonth(rows), [rows]);
   const latestYm = cancellationYm(latest.year, latest.month);
@@ -2754,13 +3240,21 @@ function CancellationAnalysisView({ data }) {
     return (
       <div className="f4h-fade-in" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
         <SectionHeading eyebrow="退会分析" title="退会者CSVの分析" />
-        <div className="f4h-card">
-          <EmptyState
-            icon={UserMinus}
-            title="退会者CSVがまだ取り込まれていません。"
-            sub="データ入力 > 退会者CSV からCSVを取り込んでください。"
-          />
-        </div>
+        <SubTabs tabs={[
+          { key: "summary", label: "退会サマリー" },
+          { key: "survey", label: "退会理由分析" },
+        ]} active={analysisTab} onChange={setAnalysisTab} />
+        {analysisTab === "summary" ? (
+          <div className="f4h-card">
+            <EmptyState
+              icon={UserMinus}
+              title="退会者CSVがまだ取り込まれていません。"
+              sub="データ入力 > 退会者CSV からCSVを取り込んでください。"
+            />
+          </div>
+        ) : (
+          <CancellationSurveyAnalysisView data={data} />
+        )}
       </div>
     );
   }
@@ -2772,6 +3266,13 @@ function CancellationAnalysisView({ data }) {
         title="退会者CSVの分析"
       />
 
+      <SubTabs tabs={[
+        { key: "summary", label: "退会サマリー" },
+        { key: "survey", label: "退会理由分析" },
+      ]} active={analysisTab} onChange={setAnalysisTab} />
+
+      {analysisTab === "summary" ? (
+      <>
       <div className="f4h-card" style={{ padding: 14, display: "grid", gap: 10 }}>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           {periodTabs.map((tab) => (
@@ -3078,6 +3579,10 @@ function CancellationAnalysisView({ data }) {
         <div style={{ fontSize: 11.5, color: "var(--ink-faint)", lineHeight: 1.7 }}>
           店舗別退会数は全店選択時のみ表示します。現在は{storeFilterLabel}のみを表示しています。
         </div>
+      )}
+      </>
+      ) : (
+        <CancellationSurveyAnalysisView data={data} />
       )}
     </div>
   );
@@ -3907,6 +4412,170 @@ function NumField({ label, value, onChange, suffix }) {
   );
 }
 
+function CancellationSurveyImportPanel({ data, updateData, showToast }) {
+  const [csvText, setCsvText] = useState("");
+  const [preview, setPreview] = useState(null);
+  const [fileName, setFileName] = useState("");
+  const fileRef = useRef(null);
+  const current = normalizeCancellationSurvey(data.cancellationSurvey);
+  const monthCounts = current.meta?.registeredMonths?.length ? current.meta.registeredMonths : monthlyCancellationSurveyCounts(current.rows);
+
+  const reset = () => {
+    setCsvText("");
+    setPreview(null);
+    setFileName("");
+    if (fileRef.current) fileRef.current.value = "";
+  };
+  const doParse = useCallback((text, name = "") => {
+    const clean = String(text || "").replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    Papa.parse(clean, {
+      header: true,
+      skipEmptyLines: true,
+      complete: (res) => {
+        const rawRows = res.data || [];
+        setPreview(parseCancellationSurveyRows(rawRows, name || fileName || "貼り付け入力"));
+      },
+      error: () => showToast("CSVの解析に失敗しました。", true),
+    });
+  }, [fileName, showToast]);
+  const onFile = useCallback((e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setFileName(f.name);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = ev.target.result || "";
+      setCsvText(text);
+      doParse(text, f.name);
+    };
+    reader.onerror = () => showToast("ファイルの読み込みに失敗しました。", true);
+    reader.readAsText(f, "UTF-8");
+  }, [doParse, showToast]);
+  const onParseText = useCallback(() => {
+    if (csvText.trim()) doParse(csvText, fileName || "貼り付け入力");
+  }, [csvText, doParse, fileName]);
+  const handleImport = async () => {
+    if (!preview || !preview.rows.length) {
+      showToast("保存対象の退会者アンケートデータがありません。", true);
+      return;
+    }
+    await updateData("cancellationSurvey", () => replaceCancellationSurveyImport(preview));
+    showToast(`退会者アンケート ${preview.rows.length}件を保存しました`);
+    reset();
+  };
+  const handleDeleteAll = async () => {
+    if (!window.confirm("保存済み退会者アンケートデータをすべて削除します。よろしいですか？この操作は元に戻せません。")) return;
+    await updateData("cancellationSurvey", () => emptyCancellationSurvey());
+    showToast("保存済み退会者アンケートデータをすべて削除しました");
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div className="f4h-card" style={{ padding: 18 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+          <Upload size={16} /><div style={{ fontWeight: 700, fontSize: 14 }}>退会者アンケートCSVを取り込む</div>
+        </div>
+        <p style={{ fontSize: 12.5, color: "var(--ink-faint)", margin: "2px 0 14px", lineHeight: 1.7 }}>
+          hacomonoから出力した退会者アンケートCSVを取り込み、退会理由分析に反映します。複数回答の項目は回答ありの件数として集計します。
+        </p>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+          <button type="button" className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} onClick={() => fileRef.current?.click()}>
+            <Upload size={14} /> CSVファイルを選択
+          </button>
+          <input ref={fileRef} type="file" accept=".csv,text/csv" style={{ display: "none" }} onChange={onFile} />
+          <span style={{ fontSize: 12, color: "var(--ink-faint)", alignSelf: "center" }}>または下に貼り付け</span>
+        </div>
+        <textarea className="f4h-input" rows={4} placeholder="退会者アンケートCSVの内容をここに貼り付け..."
+          style={{ resize: "vertical", fontFamily: "monospace", fontSize: 12 }}
+          value={csvText} onChange={(e) => {
+            setCsvText(e.target.value);
+            setFileName("貼り付け入力");
+            setPreview(null);
+          }} />
+        <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "8px 16px" }} onClick={onParseText} disabled={!csvText.trim()}>
+            読み込む
+          </button>
+          <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} disabled={!csvText && !preview} onClick={reset}>
+            <X size={13} /> リセット
+          </button>
+        </div>
+
+        {preview && (
+          <div className="f4h-fade-in" style={{ marginTop: 18, borderTop: "1px solid var(--border-soft)", paddingTop: 16 }}>
+            <div style={{ display: "flex", gap: 14, fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 8, flexWrap: "wrap" }}>
+              <CounselingStatLine label="CSV行数" value={`${preview.meta.rowCount}件`} />
+              <CounselingStatLine label="保存対象" value={`${preview.rows.length}件`} />
+              <CounselingStatLine label="スキップ" value={`${preview.skipped}件`} />
+              <span>ファイル <b>{preview.meta.lastFileName}</b></span>
+            </div>
+            {preview.rows.length === 0 ? (
+              <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginBottom: 10 }}>
+                <AlertTriangle size={14} /> 保存対象の退会者アンケートデータが見つかりません。
+              </div>
+            ) : (
+              <>
+                <div className="scrollbar-thin" style={{ maxHeight: 220, overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8, marginBottom: 12 }}>
+                  <table className="f4h-table">
+                    <thead><tr><th>登録日時</th><th>店舗</th><th>メンバーID</th><th>氏名</th><th>年齢</th><th>環境要因</th><th>サービス要因</th><th>再案内</th></tr></thead>
+                    <tbody>
+                      {preview.rows.slice(0, 50).map((r, index) => (
+                        <tr key={`${r.memberId}-${r.registeredAt}-${index}`}>
+                          <td>{r.registeredAt || "—"}</td>
+                          <td>{r.store || "不明"}</td>
+                          <td>{r.memberId || "—"}</td>
+                          <td style={{ textAlign: "left" }}>{r.memberName || "—"}</td>
+                          <td className="num">{r.age || "—"}</td>
+                          <td className="num">{r.environmentReasons.length}件</td>
+                          <td className="num">{r.serviceReasons.length}件</td>
+                          <td>{cancellationSurveyMailAllowed(r.mailPermission) ? "許可" : "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "9px 18px" }} onClick={handleImport}>
+                  <Check size={15} /> 退会者アンケート {preview.rows.length}件を保存する
+                </button>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="f4h-card" style={{ padding: 18 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+          <div style={{ fontWeight: 700, fontSize: 14 }}>保存済み退会者アンケート</div>
+          {current.rows.length > 0 && (
+            <button type="button" className="f4h-btn f4h-btn-ghost f4h-focus" style={{ padding: "7px 12px", color: "var(--red)" }} onClick={handleDeleteAll}>
+              <Trash2 size={14} /> 退会者アンケートデータをすべて削除
+            </button>
+          )}
+        </div>
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 10 }}>
+          <CounselingStatLine label="保存済み退会者アンケート 合計" value={`${current.rows.length}件`} />
+          <CounselingStatLine label="最終取込日時" value={current.meta?.lastImportedAt ? new Date(current.meta.lastImportedAt).toLocaleString("ja-JP") : "—"} />
+          <CounselingStatLine label="直近取込ファイル名" value={current.meta?.lastFileName || "—"} />
+        </div>
+        <div style={{ fontSize: 12.5, color: "var(--ink-soft)" }}>
+          <div style={{ fontWeight: 700, marginBottom: 6 }}>登録済み月</div>
+          {monthCounts.length ? (
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {monthCounts.map(({ ym, count }) => (
+                <span key={ym} style={{ border: "1px solid var(--border-soft)", borderRadius: 999, padding: "4px 9px", background: "var(--surface)" }}>
+                  {cancellationMonthLabel(ym)} {count}件
+                </span>
+              ))}
+            </div>
+          ) : (
+            <span style={{ color: "var(--ink-faint)" }}>登録済み月はありません。</span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function MonthlyActualsPanel({ data, updateData, showToast }) {
   const today = useMemo(() => todayParts(), []);
   const [store, setStore] = useState(STORE_DEFS[0].key);
@@ -4039,12 +4708,14 @@ function DataEntryView({ data, updateData, showToast }) {
         { key: "trial", label: "体験者データ" },
         { key: "join", label: "入会者データ" },
         { key: "cancellation", label: "退会者CSV" },
+        { key: "cancellationSurvey", label: "退会者アンケートCSV" },
         { key: "monthly", label: "月次実績・売上" },
         { key: "counseling", label: "カウンセリング分析用データ" },
       ]} active={tab} onChange={setTab} />
       {tab === "trial" && <TrialImportPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "join" && <JoinImportPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "cancellation" && <CancellationImportPanel data={data} updateData={updateData} showToast={showToast} />}
+      {tab === "cancellationSurvey" && <CancellationSurveyImportPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "monthly" && <MonthlyActualsPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "counseling" && <CounselingDataImportSection data={data} updateData={updateData} showToast={showToast} />}
     </div>
@@ -6351,6 +7022,7 @@ export default function App() {
   const [data, setData] = useState(() => ({
     ...SEED_DATA,
     cancellations: { rows: [], importedAt: null, source: null },
+    cancellationSurvey: emptyCancellationSurvey(),
     counselingReservations: [],
     counselingMeta: normalizeCounselingMeta(null),
     counselingActiveMembers: [],
@@ -6403,6 +7075,7 @@ export default function App() {
       staff: [], trials: [], joins: [], memberMonthly: [], baselines: SEED_DATA.baselines,
       budgetTargets: [], revenueActuals: [], settings: SEED_DATA.settings,
       cancellations: { rows: [], importedAt: null, source: null },
+      cancellationSurvey: emptyCancellationSurvey(),
       counselingReservations: [],
       counselingMeta: normalizeCounselingMeta(null),
       counselingActiveMembers: [],
