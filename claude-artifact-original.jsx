@@ -643,6 +643,19 @@ function normalizeCounselingMeta(value) {
     duplicateFallbackCount: 0,
   };
 }
+function emptyCounselingMeta() {
+  return {
+    importedAt: null,
+    filename: null,
+    rowCount: 0,
+    validCount: 0,
+    excludedCount: 0,
+    blankMemberIdCount: 0,
+    ticketExcludedCount: 0,
+    unknownDateCount: 0,
+    duplicateFallbackCount: 0,
+  };
+}
 function parseCounselingDate(raw) {
   if (raw == null) return null;
   const s = String(raw).trim();
@@ -774,6 +787,9 @@ function mergeCounselingReservations(currentValue, rows) {
     ...currentRows.filter((row) => !importMonthSet.has(counselingMonthOf(row))),
     ...(rows || []),
   ];
+}
+function deleteCounselingReservationMonth(currentValue, ym) {
+  return normalizeCounselingReservations(currentValue).filter((row) => counselingMonthOf(row) !== ym);
 }
 function exactRowValue(row, names) {
   for (const name of names) {
@@ -960,6 +976,22 @@ function deleteAllCounselingMembers(currentValue, normalizeMeta) {
       rowCount: 0,
       validCount: 0,
       excludedCount: 0,
+    },
+  };
+}
+function deleteAllCounselingActiveMembers(currentValue) {
+  const meta = normalizeCounselingActiveMembersMeta(currentValue);
+  return {
+    rows: [],
+    meta: {
+      ...meta,
+      importedAt: null,
+      filename: null,
+      rowCount: 0,
+      validCount: 0,
+      excludedCount: 0,
+      blankMemberIdCount: 0,
+      duplicateMemberIdCount: 0,
     },
   };
 }
@@ -3873,6 +3905,19 @@ function CounselingReservationImportPanel({ data, updateData, showToast }) {
     showToast(`カウンセリング予約 ${preview.rows.length}件を保存しました`);
     reset();
   };
+  const handleDeleteMonth = async (ym, count) => {
+    if (!window.confirm(`${counselingMonthLabel(ym)}の予約データ${count}件を削除します。よろしいですか？`)) return;
+    const nextRows = deleteCounselingReservationMonth(reservations, ym);
+    await updateData("counselingReservations", () => nextRows);
+    if (nextRows.length === 0) await updateData("counselingMeta", () => emptyCounselingMeta());
+    showToast(`${counselingMonthLabel(ym)}の予約データを削除しました`);
+  };
+  const handleDeleteAll = async () => {
+    if (!window.confirm("保存済み予約データをすべて削除します。よろしいですか？この操作は元に戻せません。")) return;
+    await updateData("counselingReservations", () => []);
+    await updateData("counselingMeta", () => emptyCounselingMeta());
+    showToast("保存済み予約データをすべて削除しました");
+  };
 
   return (
     <div className="f4h-card" style={{ padding: 18 }}>
@@ -3958,10 +4003,20 @@ function CounselingReservationImportPanel({ data, updateData, showToast }) {
         {monthCounts.length > 0 && (
           <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
             {monthCounts.map(({ ym, count }) => (
-              <span key={ym} style={{ padding: "4px 8px", border: "1px solid var(--border-soft)", borderRadius: 999, background: "var(--surface-soft)" }}>
-                {cancellationMonthLabel(ym)} {count}件
+              <span key={ym} style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 8px", border: "1px solid var(--border-soft)", borderRadius: 999, background: "var(--surface-soft)" }}>
+                {counselingMonthLabel(ym)} {count}件
+                <button type="button" className="f4h-btn f4h-btn-ghost f4h-focus" style={{ padding: 2, minHeight: 0, color: "var(--red)" }} title={`${counselingMonthLabel(ym)}を削除`} onClick={() => handleDeleteMonth(ym, count)}>
+                  <Trash2 size={13} />
+                </button>
               </span>
             ))}
+          </div>
+        )}
+        {reservations.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <button type="button" className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "7px 12px", color: "var(--red)" }} onClick={handleDeleteAll}>
+              <Trash2 size={14} /> 予約データをすべて削除
+            </button>
           </div>
         )}
       </div>
@@ -4185,6 +4240,11 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
     showToast(`在籍者 ${activeMembersImportStats.rows.length}件を保存しました`);
     reset();
   };
+  const handleDeleteAll = async () => {
+    if (!window.confirm(`保存済み在籍者データ${activeMembers.length}件をすべて削除します。よろしいですか？この操作は元に戻せません。`)) return;
+    await updateData("counselingActiveMembers", (cur) => deleteAllCounselingActiveMembers(cur));
+    showToast("保存済み在籍者データをすべて削除しました");
+  };
 
   return (
     <div className="f4h-card" style={{ padding: 18 }}>
@@ -4301,6 +4361,13 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
           <CounselingStatLine label="メンバーID空欄除外" value={`${activeMembersMeta.blankMemberIdCount || 0}件`} />
           <CounselingStatLine label="重複除外/上書き" value={`${activeMembersMeta.duplicateMemberIdCount || 0}件`} />
         </div>
+        {activeMembers.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <button type="button" className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "7px 12px", color: "var(--red)" }} onClick={handleDeleteAll}>
+              <Trash2 size={14} /> 在籍者データをすべて削除
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
