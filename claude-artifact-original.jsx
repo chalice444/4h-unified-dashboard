@@ -660,6 +660,33 @@ function counselingReservationKey(row) {
   if (row.reservationId) return `reservation:${row.reservationId}`;
   return `fallback:${row.memberId || ""}__${row.lessonDate || ""}__${row.startTime || ""}__${row.ticket || ""}`;
 }
+const REQUIRED_COUNSELING_RESERVATION_HEADERS = [
+  { label: "予約ID", names: ["予約ID", "予約 Id", "予約番号"] },
+  { label: "予約ステータス", names: ["予約ステータス", "ステータス"] },
+  { label: "店舗", names: ["店舗", "店舗名", "施設", "施設名"] },
+  { label: "使用チケット", names: ["使用チケット", "チケット", "チケット名"] },
+  { label: "予約処理日", names: ["予約処理日", "予約受付日", "申込日"] },
+  { label: "受講日", names: ["受講日", "予約日", "実施日", "来店日"] },
+  { label: "開始時刻", names: ["開始時刻", "開始時間", "開始"] },
+  { label: "終了時刻", names: ["終了時刻", "終了時間", "終了"] },
+  { label: "スタッフ名", names: ["スタッフ名", "担当スタッフ", "担当者"] },
+  { label: "メンバーID", names: ["メンバーID", "会員ID", "メンバー_ID"] },
+  { label: "氏名", names: ["氏名", "名前", "会員名", "メンバー名"] },
+  { label: "性別", names: ["性別"] },
+  { label: "年齢", names: ["年齢"] },
+];
+function csvHeaderExists(headers, names) {
+  return names.some((name) => headers.some((header) => {
+    const h = String(header || "").replace(/^\uFEFF/, "").trim();
+    return h === name || h.includes(name);
+  }));
+}
+function missingCounselingReservationHeaders(headers) {
+  const fields = Array.isArray(headers) ? headers : [];
+  return REQUIRED_COUNSELING_RESERVATION_HEADERS
+    .filter((field) => !csvHeaderExists(fields, field.names))
+    .map((field) => field.label);
+}
 function parseCounselingRows(rawRows) {
   const map = new Map();
   const stats = {
@@ -670,6 +697,7 @@ function parseCounselingRows(rawRows) {
     ticketExcludedCount: 0,
     unknownDateCount: 0,
     duplicateFallbackCount: 0,
+    missingRequiredHeaders: [],
   };
   for (const row of rawRows) {
     const ticket = String(rowValue(row, ["使用チケット", "チケット", "チケット名"]) || "").trim();
@@ -2775,6 +2803,7 @@ function TrialImportPanel({ data, updateData, showToast }) {
   const [search, setSearch] = useState("");
   const [visibleCount, setVisibleCount] = useState(40);
   const [delTarget, setDelTarget] = useState(null);
+  const [selectedTrialIds, setSelectedTrialIds] = useState([]);
   const fileRef = useRef(null);
 
   const doParse = useCallback((text) => {
@@ -2846,8 +2875,18 @@ function TrialImportPanel({ data, updateData, showToast }) {
   const noshowCount = data.trials.filter((t) => t.manualJoinMonth === NOSHOW_MARKER).length;
 
   const unassignedCount = data.trials.filter((t) => !t.staff && t.store).length;
+  const visibleTrials = filteredTrials.slice(0, visibleCount);
+  const visibleTrialIds = useMemo(() => visibleTrials.map((t) => t.id), [visibleTrials]);
+  const visibleIdSet = useMemo(() => new Set(visibleTrialIds), [visibleTrialIds]);
+  const allVisibleSelected = visibleTrialIds.length > 0 && visibleTrialIds.every((id) => selectedTrialIds.includes(id));
+  const someVisibleSelected = visibleTrialIds.some((id) => selectedTrialIds.includes(id));
 
   const joinsMap = useMemo(() => buildJoinsMap(data.joins), [data.joins]);
+
+  useEffect(() => {
+    const filteredIds = new Set(filteredTrials.map((t) => t.id));
+    setSelectedTrialIds((ids) => ids.filter((id) => filteredIds.has(id)));
+  }, [filteredTrials]);
 
   const setStaffFor = async (id, staff) => {
     await updateData("trials", (cur) => cur.map((t) => (t.id === id ? { ...t, staff } : t)));
@@ -2858,8 +2897,34 @@ function TrialImportPanel({ data, updateData, showToast }) {
   };
   const deleteTrial = async (id) => {
     await updateData("trials", (cur) => cur.filter((t) => t.id !== id));
+    setSelectedTrialIds((ids) => ids.filter((selectedId) => selectedId !== id));
     setDelTarget(null);
     showToast("削除しました");
+  };
+  const toggleTrialSelection = (id, checked) => {
+    setSelectedTrialIds((ids) => {
+      if (checked) return ids.includes(id) ? ids : [...ids, id];
+      return ids.filter((selectedId) => selectedId !== id);
+    });
+  };
+  const toggleAllVisibleTrials = (checked) => {
+    setSelectedTrialIds((ids) => {
+      const current = new Set(ids);
+      for (const id of visibleTrialIds) {
+        if (checked) current.add(id);
+        else current.delete(id);
+      }
+      return [...current];
+    });
+  };
+  const deleteSelectedTrials = async () => {
+    const idsToDelete = selectedTrialIds.filter((id) => data.trials.some((t) => t.id === id));
+    if (!idsToDelete.length) return;
+    if (!window.confirm(`選択した${idsToDelete.length}件の体験者データを削除します。よろしいですか？`)) return;
+    const deleteSet = new Set(idsToDelete);
+    await updateData("trials", (cur) => cur.filter((t) => !deleteSet.has(t.id)));
+    setSelectedTrialIds([]);
+    showToast(`${idsToDelete.length}件を削除しました`);
   };
 
   const mappingValid = mapping && mapping.store && mapping.ticket && mapping.lessonDate;
@@ -2965,16 +3030,40 @@ function TrialImportPanel({ data, updateData, showToast }) {
             <Pill active={filterNoshow} onClick={() => setFilterNoshow((v) => !v)}>来店無しのみ{noshowCount > 0 ? `（${noshowCount}）` : ""}</Pill>
           </div>
         </div>
+        {selectedTrialIds.length > 0 && (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 12, padding: "9px 12px", border: "1px solid var(--border-soft)", borderRadius: 8, background: "var(--surface-soft)" }}>
+            <div style={{ fontSize: 12.5, color: "var(--ink-soft)" }}>選択中：<b className="num">{selectedTrialIds.length}</b>件</div>
+            <button className="f4h-btn f4h-btn-danger f4h-focus" style={{ padding: "7px 12px" }} onClick={deleteSelectedTrials}>
+              <Trash2 size={14} /> 選択削除
+            </button>
+          </div>
+        )}
         {filteredTrials.length === 0 ? (
           <EmptyState icon={Upload} title="該当する体験データがありません" sub="上のフォームからCSVを取り込んでください。" />
         ) : (
           <>
             <div className="scrollbar-thin" style={{ overflow: "auto" }}>
               <table className="f4h-table">
-                <thead><tr><th>受講日</th><th>店舗</th><th>メンバーID</th><th>氏名</th><th>担当者</th><th>入会月</th><th></th></tr></thead>
+                <thead><tr><th style={{ width: 34 }}>
+                  <input
+                    type="checkbox"
+                    aria-label="表示中の体験者を全選択"
+                    checked={allVisibleSelected}
+                    ref={(el) => { if (el) el.indeterminate = !allVisibleSelected && someVisibleSelected; }}
+                    onChange={(e) => toggleAllVisibleTrials(e.target.checked)}
+                  />
+                </th><th>受講日</th><th>店舗</th><th>メンバーID</th><th>氏名</th><th>担当者</th><th>入会月</th><th></th></tr></thead>
                 <tbody>
-                  {filteredTrials.slice(0, visibleCount).map((t) => (
+                  {visibleTrials.map((t) => (
                     <tr key={t.id}>
+                      <td>
+                        <input
+                          type="checkbox"
+                          aria-label={`${t.name || t.memberId || "体験者"}を選択`}
+                          checked={selectedTrialIds.includes(t.id)}
+                          onChange={(e) => toggleTrialSelection(t.id, e.target.checked)}
+                        />
+                      </td>
                       <td>{t.lessonDate || "—"}</td>
                       <td style={{ textAlign: "left" }}>{t.store || "—"}</td>
                       <td>{t.memberId || "—"}</td>
@@ -4334,7 +4423,7 @@ function ActiveCounselingProgressSection({ data }) {
       </div>
 
       <p style={{ fontSize: 12.5, color: "var(--ink-faint)", lineHeight: 1.7, margin: "0 0 14px" }}>
-        在籍者は「入会日時」を利用開始日として集計しています。「最終カウンセリング日」は、自由枠：予約一覧のカウンセリング系予約でチェックインした最新受講日です。無料スタジオレッスン等の最終受講日は含みません。
+        在籍者は「入会日時」を利用開始日として集計しています。「最終カウンセリング日」は、予約一覧CSVのカウンセリング系予約でチェックインした最新受講日です。無料スタジオレッスン等の最終受講日は含みません。
       </p>
 
       {filteredRows.length === 0 ? (
@@ -4480,7 +4569,7 @@ function NewMemberCounselingProgressSection({ data }) {
       </div>
 
       <p style={{ fontSize: 12.5, color: "var(--ink-faint)", lineHeight: 1.7, margin: "0 0 14px" }}>
-        新規入会者は「プラン契約適用開始日」を利用開始日として集計しています。プラン契約適用開始日が空欄の場合のみ「入会日時」を代替利用します。「最終カウンセリング日」は、自由枠：予約一覧のカウンセリング系予約でチェックインした最新受講日です。無料スタジオレッスン等の最終受講日は含みません。
+        新規入会者は「プラン契約適用開始日」を利用開始日として集計しています。プラン契約適用開始日が空欄の場合のみ「入会日時」を代替利用します。「最終カウンセリング日」は、予約一覧CSVのカウンセリング系予約でチェックインした最新受講日です。無料スタジオレッスン等の最終受講日は含みません。
       </p>
 
       {filteredRows.length === 0 ? (
@@ -4591,7 +4680,7 @@ function CancelMemberCounselingProgressSection({ data }) {
       </div>
 
       <p style={{ fontSize: 12.5, color: "var(--ink-faint)", lineHeight: 1.7, margin: "0 0 14px" }}>
-        退会者は「プラン契約適用終了日」を退会月として集計しています。利用開始日は、同じメンバーIDが新規入会CSVに存在する場合は新規入会CSVの利用開始日を優先し、存在しない場合は退会CSVの「入会日時」を使います。退会CSVの「プラン契約適用開始日」は、プラン変更などで更新される可能性があるため利用開始日には使いません。「最終カウンセリング日」は、自由枠：予約一覧のカウンセリング系予約でチェックインした最新受講日です。無料スタジオレッスン等の最終受講日は含みません。
+        退会者は「プラン契約適用終了日」を退会月として集計しています。利用開始日は、同じメンバーIDが新規入会CSVに存在する場合は新規入会CSVの利用開始日を優先し、存在しない場合は退会CSVの「入会日時」を使います。退会CSVの「プラン契約適用開始日」は、プラン変更などで更新される可能性があるため利用開始日には使いません。「最終カウンセリング日」は、予約一覧CSVのカウンセリング系予約でチェックインした最新受講日です。無料スタジオレッスン等の最終受講日は含みません。
       </p>
 
       {filteredRows.length === 0 ? (
@@ -4663,9 +4752,10 @@ function CounselingAnalysisView({ data, updateData, showToast }) {
       complete: (res) => {
         const rawRows = res.data || [];
         const parsed = parseCounselingRows(rawRows);
+        const missingRequiredHeaders = missingCounselingReservationHeaders(res.meta?.fields || []);
         setPreview({
           rows: parsed.rows,
-          stats: parsed.stats,
+          stats: { ...parsed.stats, missingRequiredHeaders },
           filename: name || "貼り付けCSV",
         });
       },
@@ -4722,10 +4812,10 @@ function CounselingAnalysisView({ data, updateData, showToast }) {
 
       <div className="f4h-card" style={{ padding: 18 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-          <Upload size={16} /><div style={{ fontWeight: 700, fontSize: 14 }}>hacomono 自由枠：予約一覧CSVを取り込む</div>
+          <Upload size={16} /><div style={{ fontWeight: 700, fontSize: 14 }}>hacomono「予約一覧」CSVを取り込む</div>
         </div>
         <p style={{ fontSize: 12.5, color: "var(--ink-faint)", margin: "2px 0 14px", lineHeight: 1.7 }}>
-          使用チケットが「初回カウンセリング」「２回目カウンセリング」「３回目カウンセリング」「４回目以降カウンセリング」の予約だけを保存します。メンバーIDが空欄の行、対象外チケット、受講日が不明な行は保存対象外です。
+          固定枠：予約一覧CSV、自由枠：予約一覧CSVのどちらにも対応しています。ファイル名ではなくCSVヘッダー名で必要項目を取得します。使用チケットが「初回カウンセリング」「２回目カウンセリング」「３回目カウンセリング」「４回目以降カウンセリング」の予約だけを保存します。
         </p>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
           <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} onClick={() => fileRef.current?.click()}>
@@ -4757,6 +4847,11 @@ function CounselingAnalysisView({ data, updateData, showToast }) {
               <StatLine label="受講日不明除外" value={`${preview.stats.unknownDateCount}件`} />
               <span>ファイル <b>{preview.filename}</b></span>
             </div>
+            {preview.stats.missingRequiredHeaders?.length > 0 && (
+              <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginBottom: 10 }}>
+                <AlertTriangle size={14} /> 必須列が見つかりません: {preview.stats.missingRequiredHeaders.join(" / ")}
+              </div>
+            )}
             {preview.rows.length === 0 ? (
               <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginBottom: 10 }}>
                 <AlertTriangle size={14} /> 保存対象のカウンセリング予約が見つかりません。
