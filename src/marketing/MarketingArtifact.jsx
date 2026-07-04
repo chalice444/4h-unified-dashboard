@@ -1261,7 +1261,7 @@ function ChannelView({ questUme, questKom, period, customStart, customEnd }) {
     <div className="m4h-fade" style={{ display:"flex",flexDirection:"column",gap:16 }}>
       <SectionHead eyebrow="集客チャネル分析" title="どこから来ているか" action={
         <div style={{ display:"flex",gap:6 }}>
-          <Pill active={filterStore===""} onClick={() => setFilterStore("")}>両店</Pill>
+          <Pill active={filterStore===""} onClick={() => setFilterStore("")}>全店</Pill>
           {STORE_KEYS.map(k => <Pill key={k} active={filterStore===k} onClick={() => setFilterStore(k)}>{k}</Pill>)}
         </div>
       } />
@@ -1408,7 +1408,7 @@ function MotivationView({ questUme, questKom, period, customStart, customEnd }) 
     <div className="m4h-fade" style={{ display:"flex",flexDirection:"column",gap:16 }}>
       <SectionHead eyebrow="入会動機分析" title="なぜ入会したか" action={
         <div style={{ display:"flex",gap:6,flexWrap:"wrap" }}>
-          <Pill active={filterStore===""} onClick={() => setFilterStore("")}>両店</Pill>
+          <Pill active={filterStore===""} onClick={() => setFilterStore("")}>全店</Pill>
           {STORE_KEYS.map(k => <Pill key={k} active={filterStore===k} onClick={() => setFilterStore(k)}>{k}</Pill>)}
         </div>
       } />
