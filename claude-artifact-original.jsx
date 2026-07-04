@@ -761,6 +761,16 @@ function activeMemberRowValue(row, names, { exact = false } = {}) {
   }
   return "";
 }
+function activeMemberPreviewStats(text, parseResult, parsedStats) {
+  const fields = Array.isArray(parseResult?.meta?.fields) ? parseResult.meta.fields : [];
+  const cleanText = String(text || "");
+  return {
+    ...parsedStats,
+    csvCharCount: cleanText.length,
+    parsedRowCount: Array.isArray(parseResult?.data) ? parseResult.data.length : 0,
+    headerFields: fields.map((field) => String(field ?? "").replace(/^\uFEFF/, "").trim()).filter(Boolean).slice(0, 12),
+  };
+}
 function normalizeCounselingActiveMembers(value) {
   if (Array.isArray(value)) return value;
   if (Array.isArray(value?.rows)) return value.rows;
@@ -3320,17 +3330,37 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
   };
 
   const doParse = useCallback((text, name = "") => {
-    const clean = text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    const rawText = String(text ?? "");
+    const clean = rawText.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    if (!clean.trim()) {
+      setPreview({
+        rows: [],
+        stats: activeMemberPreviewStats(clean, { data: [], meta: { fields: [] } }, {
+          rowCount: 0,
+          validCount: 0,
+          excludedCount: 0,
+          blankMemberIdCount: 0,
+          duplicateMemberIdCount: 0,
+        }),
+        filename: name || "貼り付けCSV",
+        message: "CSV本文を読み取れませんでした。ファイル選択または貼り付け内容を確認してください。",
+      });
+      return;
+    }
     Papa.parse(clean, {
       header: true,
-      skipEmptyLines: true,
+      skipEmptyLines: "greedy",
+      transformHeader: (header) => String(header ?? "").replace(/^\uFEFF/, "").trim(),
       complete: (res) => {
         const rawRows = res.data || [];
         const parsed = parseCounselingActiveMembers(rawRows);
         setPreview({
           rows: parsed.rows,
-          stats: parsed.stats,
+          stats: activeMemberPreviewStats(clean, res, parsed.stats),
           filename: name || "貼り付けCSV",
+          message: rawRows.length === 0
+            ? "CSV本文を読み取れませんでした。ファイル選択または貼り付け内容を確認してください。"
+            : "",
         });
       },
       error: () => showToast("CSVの解析に失敗しました。", true),
@@ -3352,7 +3382,7 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
   }, [doParse, showToast]);
 
   const onParseText = useCallback(() => {
-    if (csvText.trim()) doParse(csvText, fileName);
+    doParse(csvText, fileName);
   }, [csvText, doParse, fileName]);
 
   const handleImport = async () => {
@@ -3395,7 +3425,7 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
         style={{ resize: "vertical", fontFamily: "monospace", fontSize: 12 }}
         value={csvText} onChange={(e) => setCsvText(e.target.value)} />
       <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "8px 16px" }} onClick={onParseText} disabled={!csvText.trim()}>
+        <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "8px 16px" }} onClick={onParseText}>
           読み込む
         </button>
         <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} disabled={!csvText && !preview} onClick={reset}>
@@ -3406,6 +3436,8 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
       {preview && (
         <div className="f4h-fade-in" style={{ marginTop: 18, borderTop: "1px solid var(--border-soft)", paddingTop: 16 }}>
           <div style={{ display: "flex", gap: 14, fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 8, flexWrap: "wrap" }}>
+            <CounselingStatLine label="CSV本文文字数" value={`${preview.stats.csvCharCount || 0}文字`} />
+            <CounselingStatLine label="parse後総行数" value={`${preview.stats.parsedRowCount || 0}件`} />
             <CounselingStatLine label="今回取込の総行数" value={`${preview.stats.rowCount}件`} />
             <CounselingStatLine label="有効件数" value={`${preview.stats.validCount}件`} />
             <CounselingStatLine label="対象外件数" value={`${preview.stats.excludedCount}件`} />
@@ -3413,6 +3445,14 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
             <CounselingStatLine label="メンバーID重複" value={`${preview.stats.duplicateMemberIdCount}件`} />
             <span>ファイル <b>{preview.filename}</b></span>
           </div>
+          <div style={{ fontSize: 12, color: "var(--ink-faint)", marginBottom: 10, lineHeight: 1.6 }}>
+            検出したヘッダー列名: {preview.stats.headerFields?.length ? preview.stats.headerFields.join(" / ") : "—"}
+          </div>
+          {preview.message && (
+            <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginBottom: 10 }}>
+              <AlertTriangle size={14} /> {preview.message}
+            </div>
+          )}
           {preview.rows.length === 0 ? (
             <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginBottom: 10 }}>
               <AlertTriangle size={14} /> 保存対象の在籍者データが見つかりません。
