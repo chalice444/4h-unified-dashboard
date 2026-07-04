@@ -1484,6 +1484,59 @@ function cancellationTenureAnalysis(rows, year, month) {
   }
   return { bands, stats };
 }
+function cancellationTenureAgeBandOf(age) {
+  if (age == null || age === "") return "年齢不明";
+  const n = Number(age);
+  if (!Number.isFinite(n) || n < 10) return "年齢不明";
+  if (n < 20) return "10代";
+  if (n < 30) return "20代";
+  if (n < 40) return "30代";
+  if (n < 50) return "40代";
+  if (n < 60) return "50代";
+  if (n < 70) return "60代";
+  return "70代以上";
+}
+function cancellationAgeTenureAnalysis(rows, year, month) {
+  const ym = `${year}-${String(month).padStart(2, "0")}`;
+  const ageLabels = ["10代", "20代", "30代", "40代", "50代", "60代", "70代以上", "年齢不明"];
+  const bandLabels = ["3ヶ月以内", "4〜6ヶ月", "7〜12ヶ月", "13ヶ月以上"];
+  const ageRows = ageLabels.map((label) => ({
+    label,
+    count: 0,
+    values: [],
+    ...Object.fromEntries(bandLabels.map((band) => [band, 0])),
+  }));
+  let excludedCount = 0;
+
+  for (const row of rows) {
+    if (cancellationMonthOf(row) !== ym) continue;
+    if (!row?.planContractDate || !row?.planEndDate) {
+      excludedCount += 1;
+      continue;
+    }
+    const tenureMonths = monthsBetween(row.planContractDate, row.planEndDate);
+    const band = tenureBandOf(tenureMonths);
+    if (!band) {
+      excludedCount += 1;
+      continue;
+    }
+    const ageBand = cancellationTenureAgeBandOf(row.age);
+    const rec = ageRows.find((item) => item.label === ageBand);
+    if (!rec) continue;
+    rec.count += 1;
+    rec.values.push(tenureMonths);
+    rec[band] += 1;
+  }
+
+  return {
+    rows: ageRows.map(({ values, ...row }) => ({
+      ...row,
+      avg: values.length ? values.reduce((sum, v) => sum + v, 0) / values.length : null,
+      median: medianOf(values),
+    })),
+    excludedCount,
+  };
+}
 function cancellationAgeGroupOf(age) {
   if (age == null || age === "") return "年齢不明";
   const n = Number(age);
@@ -2618,6 +2671,7 @@ function CancellationAnalysisView({ data }) {
   const weeklyRequestTotal = weeklyRequestRows.reduce((sum, row) => sum + row.all, 0);
   const tenureAnalysis = useMemo(() => cancellationTenureAnalysis(singleMonthRows, 2000, 1), [singleMonthRows]);
   const tenureValidTotal = tenureAnalysis.stats.all.count;
+  const ageTenureAnalysis = useMemo(() => cancellationAgeTenureAnalysis(singleMonthRows, 2000, 1), [singleMonthRows]);
   const attributeBreakdown = useMemo(() => cancellationAttributeBreakdown(singleMonthRows, 2000, 1), [singleMonthRows]);
   const rawConfirmedCounts = useMemo(() => confirmedCancellationCountsForPeriod(data.memberMonthly, period), [data.memberMonthly, period]);
   const confirmedCounts = useMemo(() => storeFilter === "all" ? rawConfirmedCounts : { all: rawConfirmedCounts[storeFilter] }, [rawConfirmedCounts, storeFilter]);
@@ -2896,6 +2950,41 @@ function CancellationAnalysisView({ data }) {
         </table>
         <div style={noteStyle}>
           在籍期間は「プラン契約日」から「プラン契約適用終了日」までで計算しています。プラン契約日またはプラン契約適用終了日がないデータは、この分析から除外しています。
+        </div>
+        <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--border-soft)" }}>
+          <div style={{ ...sectionTitleStyle, marginBottom: 8 }}>年齢別 在籍期間分析</div>
+          <div style={{ fontSize: 11.5, color: "var(--ink-faint)", lineHeight: 1.6, marginBottom: 10 }}>
+            年齢別の平均・中央値在籍月数は、既存の在籍期間分析と同じく「プラン契約日」から「プラン契約適用終了日」までで計算しています。
+            {ageTenureAnalysis.excludedCount > 0 && ` プラン契約日またはプラン契約適用終了日がないため除外したデータは${num(ageTenureAnalysis.excludedCount)}件です。`}
+          </div>
+          <table className="f4h-table" style={{ fontSize: 12.5 }}>
+            <thead>
+              <tr>
+                <th>年齢帯</th>
+                <th>退会者数</th>
+                <th>平均在籍月数</th>
+                <th>中央値在籍月数</th>
+                <th>3ヶ月以内</th>
+                <th>4〜6ヶ月</th>
+                <th>7〜12ヶ月</th>
+                <th>13ヶ月以上</th>
+              </tr>
+            </thead>
+            <tbody>
+              {ageTenureAnalysis.rows.map((row) => (
+                <tr key={row.label}>
+                  <td style={{ fontWeight: 800 }}>{row.label}</td>
+                  <td className="num">{num(row.count)}人</td>
+                  <td className="num">{tenureMonthText(row.avg)}</td>
+                  <td className="num">{tenureMonthText(row.median)}</td>
+                  <td className="num">{num(row["3ヶ月以内"])}人</td>
+                  <td className="num">{num(row["4〜6ヶ月"])}人</td>
+                  <td className="num">{num(row["7〜12ヶ月"])}人</td>
+                  <td className="num">{num(row["13ヶ月以上"])}人</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       </div>
 
