@@ -836,6 +836,12 @@ function normalizeCounselingNewMembersMeta(value) {
     unknownStartDateCount: 0,
   };
 }
+function normalizeCounselingMemberImports(value) {
+  const imports = value && typeof value === "object" && !Array.isArray(value) ? value.imports : null;
+  if (Array.isArray(imports)) return imports;
+  if (imports && typeof imports === "object") return Object.values(imports);
+  return [];
+}
 function normalizeCounselingCancelMembers(value) {
   if (Array.isArray(value)) return value;
   if (Array.isArray(value?.rows)) return value.rows;
@@ -853,6 +859,64 @@ function normalizeCounselingCancelMembersMeta(value) {
     duplicateMemberIdCount: 0,
     unknownStartDateCount: 0,
     unknownCancelMonthCount: 0,
+  };
+}
+function counselingNewMemberMonthOf(row) {
+  return row?.startMonth || monthOfIsoDate(row?.startDate);
+}
+function counselingCancelMemberMonthOf(row) {
+  return row?.cancelMonth || monthOfIsoDate(row?.planEndDate);
+}
+function monthlyCounselingMemberCounts(rows, monthOf) {
+  const counts = {};
+  for (const row of rows || []) {
+    const ym = monthOf(row);
+    if (!ym) continue;
+    counts[ym] = (counts[ym] || 0) + 1;
+  }
+  return Object.entries(counts)
+    .map(([ym, count]) => ({ ym, count }))
+    .sort((a, b) => a.ym.localeCompare(b.ym));
+}
+function mergeCounselingMemberMonthImport(currentValue, importedRows, stats, filename, monthOf) {
+  const currentRows = Array.isArray(currentValue?.rows) ? currentValue.rows : normalizeCounselingNewMembers(currentValue);
+  const importMonths = [...new Set((importedRows || []).map(monthOf).filter(Boolean))];
+  const importMonthSet = new Set(importMonths);
+  const nextRowsRaw = [
+    ...currentRows.filter((row) => !importMonthSet.has(monthOf(row))),
+    ...(importedRows || []),
+  ];
+  const nextRowsByMemberId = new Map();
+  for (const row of nextRowsRaw) {
+    const key = row?.memberId || JSON.stringify(row);
+    nextRowsByMemberId.set(key, row);
+  }
+  const nextRows = [...nextRowsByMemberId.values()];
+  const importedAt = new Date().toISOString();
+  const previousImports = normalizeCounselingMemberImports(currentValue);
+  const nextImports = [
+    ...previousImports.filter((item) => {
+      const months = Array.isArray(item?.months) ? item.months : [item?.month].filter(Boolean);
+      return !months.some((month) => importMonthSet.has(month));
+    }),
+    {
+      importedAt,
+      fileName: filename || null,
+      months: importMonths,
+      totalRows: stats?.rowCount || 0,
+      validRows: (importedRows || []).length,
+    },
+  ];
+  return {
+    rows: nextRows,
+    imports: nextImports,
+    meta: {
+      lastImportedAt: importedAt,
+      lastFileName: filename || null,
+      importedAt,
+      filename: filename || null,
+      ...(stats || {}),
+    },
   };
 }
 function parseCounselingActiveMembers(rawRows) {
@@ -1520,10 +1584,10 @@ async function loadAllData() {
       ? { rows: normalizeCounselingActiveMembers(counselingActiveMembers), meta: normalizeCounselingActiveMembersMeta(counselingActiveMembers) }
       : normalizeCounselingActiveMembers(counselingActiveMembers),
     counselingNewMembers: counselingNewMembers && typeof counselingNewMembers === "object" && !Array.isArray(counselingNewMembers)
-      ? { rows: normalizeCounselingNewMembers(counselingNewMembers), meta: normalizeCounselingNewMembersMeta(counselingNewMembers) }
+      ? { rows: normalizeCounselingNewMembers(counselingNewMembers), imports: normalizeCounselingMemberImports(counselingNewMembers), meta: normalizeCounselingNewMembersMeta(counselingNewMembers) }
       : normalizeCounselingNewMembers(counselingNewMembers),
     counselingCancelMembers: counselingCancelMembers && typeof counselingCancelMembers === "object" && !Array.isArray(counselingCancelMembers)
-      ? { rows: normalizeCounselingCancelMembers(counselingCancelMembers), meta: normalizeCounselingCancelMembersMeta(counselingCancelMembers) }
+      ? { rows: normalizeCounselingCancelMembers(counselingCancelMembers), imports: normalizeCounselingMemberImports(counselingCancelMembers), meta: normalizeCounselingCancelMembersMeta(counselingCancelMembers) }
       : normalizeCounselingCancelMembers(counselingCancelMembers),
   };
 }
@@ -3903,6 +3967,7 @@ function NewMemberImportPanel({ data, updateData, showToast }) {
   const newMembersFileInputRef = useRef(null);
   const newMembers = normalizeCounselingNewMembers(data.counselingNewMembers);
   const newMembersMeta = normalizeCounselingNewMembersMeta(data.counselingNewMembers);
+  const newMemberMonthCounts = monthlyCounselingMemberCounts(newMembers, counselingNewMemberMonthOf);
 
   const reset = () => {
     setNewMembersCsvText("");
@@ -4002,14 +4067,15 @@ function NewMemberImportPanel({ data, updateData, showToast }) {
       showToast("保存対象の新規入会者データがありません。", true);
       return;
     }
-    await updateData("counselingNewMembers", () => ({
-      rows: newMembersImportStats.rows,
-      meta: {
-        importedAt: new Date().toISOString(),
-        filename: newMembersImportStats.filename,
-        ...newMembersImportStats.stats,
-      },
-    }));
+    await updateData("counselingNewMembers", (cur) => (
+      mergeCounselingMemberMonthImport(
+        cur,
+        newMembersImportStats.rows,
+        newMembersImportStats.stats,
+        newMembersImportStats.filename,
+        counselingNewMemberMonthOf
+      )
+    ));
     showToast(`新規入会者 ${newMembersImportStats.rows.length}件を保存しました`);
     reset();
   };
@@ -4128,6 +4194,20 @@ function NewMemberImportPanel({ data, updateData, showToast }) {
           <CounselingStatLine label="メンバーID空欄除外" value={`${newMembersMeta.blankMemberIdCount || 0}件`} />
           <CounselingStatLine label="重複除外/上書き" value={`${newMembersMeta.duplicateMemberIdCount || 0}件`} />
         </div>
+        <div style={{ marginTop: 10 }}>
+          <div style={{ fontWeight: 700, fontSize: 12, color: "var(--ink-faint)", marginBottom: 4 }}>登録済み月</div>
+          {newMemberMonthCounts.length ? (
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {newMemberMonthCounts.map(({ ym, count }) => (
+                <span key={ym} style={{ padding: "4px 8px", border: "1px solid var(--border-soft)", borderRadius: 999, background: "var(--surface-soft)" }}>
+                  {cancellationMonthLabel(ym)} {count}件
+                </span>
+              ))}
+            </div>
+          ) : (
+            <div style={{ color: "var(--ink-faint)" }}>—</div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -4142,6 +4222,7 @@ function CancelMemberImportPanel({ data, updateData, showToast }) {
   const cancelMembersFileInputRef = useRef(null);
   const cancelMembers = normalizeCounselingCancelMembers(data.counselingCancelMembers);
   const cancelMembersMeta = normalizeCounselingCancelMembersMeta(data.counselingCancelMembers);
+  const cancelMemberMonthCounts = monthlyCounselingMemberCounts(cancelMembers, counselingCancelMemberMonthOf);
 
   const reset = () => {
     setCancelMembersCsvText("");
@@ -4241,14 +4322,15 @@ function CancelMemberImportPanel({ data, updateData, showToast }) {
       showToast("保存対象の退会者データがありません。", true);
       return;
     }
-    await updateData("counselingCancelMembers", () => ({
-      rows: cancelMembersImportStats.rows,
-      meta: {
-        importedAt: new Date().toISOString(),
-        filename: cancelMembersImportStats.filename,
-        ...cancelMembersImportStats.stats,
-      },
-    }));
+    await updateData("counselingCancelMembers", (cur) => (
+      mergeCounselingMemberMonthImport(
+        cur,
+        cancelMembersImportStats.rows,
+        cancelMembersImportStats.stats,
+        cancelMembersImportStats.filename,
+        counselingCancelMemberMonthOf
+      )
+    ));
     showToast(`退会者 ${cancelMembersImportStats.rows.length}件を保存しました`);
     reset();
   };
@@ -4369,6 +4451,20 @@ function CancelMemberImportPanel({ data, updateData, showToast }) {
           <CounselingStatLine label="メンバーID空欄除外" value={`${cancelMembersMeta.blankMemberIdCount || 0}件`} />
           <CounselingStatLine label="重複除外/上書き" value={`${cancelMembersMeta.duplicateMemberIdCount || 0}件`} />
           <CounselingStatLine label="退会月不明" value={`${cancelMembersMeta.unknownCancelMonthCount || 0}件`} />
+        </div>
+        <div style={{ marginTop: 10 }}>
+          <div style={{ fontWeight: 700, fontSize: 12, color: "var(--ink-faint)", marginBottom: 4 }}>登録済み退会月</div>
+          {cancelMemberMonthCounts.length ? (
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {cancelMemberMonthCounts.map(({ ym, count }) => (
+                <span key={ym} style={{ padding: "4px 8px", border: "1px solid var(--border-soft)", borderRadius: 999, background: "var(--surface-soft)" }}>
+                  {cancellationMonthLabel(ym)} {count}件
+                </span>
+              ))}
+            </div>
+          ) : (
+            <div style={{ color: "var(--ink-faint)" }}>—</div>
+          )}
         </div>
       </div>
     </div>
