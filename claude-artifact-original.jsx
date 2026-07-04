@@ -727,6 +727,141 @@ function mergeCounselingReservations(currentValue, rows) {
     ...(rows || []),
   ];
 }
+function exactRowValue(row, names) {
+  for (const name of names) {
+    if (Object.prototype.hasOwnProperty.call(row, name)) return row[name];
+  }
+  const keys = Object.keys(row);
+  for (const name of names) {
+    const key = keys.find((k) => String(k).trim() === name);
+    if (key) return row[key];
+  }
+  return "";
+}
+function normalizeCounselingActiveMembers(value) {
+  return Array.isArray(value) ? value : [];
+}
+function parseCounselingActiveMembers(rawRows) {
+  const map = new Map();
+  const stats = {
+    rowCount: rawRows.length,
+    validCount: 0,
+    excludedCount: 0,
+    blankMemberIdCount: 0,
+    duplicateMemberIdCount: 0,
+  };
+  for (const row of rawRows) {
+    const memberId = normalizeMemberId(rowValue(row, ["メンバーID", "会員ID", "メンバー_ID"]));
+    if (!memberId) {
+      stats.blankMemberIdCount += 1;
+      continue;
+    }
+    if (map.has(memberId)) {
+      stats.duplicateMemberIdCount += 1;
+      console.warn("[counseling] duplicate active member id; later row wins", memberId);
+    }
+    const storeRaw = String(exactRowValue(row, ["所属店舗名"]) || "").trim();
+    const joinDate = parseCounselingDate(rowValue(row, ["入会日時", "入会日"]));
+    const cancellationRequestDate = parseCounselingDate(rowValue(row, ["退会手続き日"]));
+    const activeMember = {
+      memberId,
+      name: String(rowValue(row, ["氏名", "名前", "会員名", "メンバー名"]) || "").trim(),
+      gender: String(rowValue(row, ["性別"]) || "").trim(),
+      age: Number(rowValue(row, ["年齢"])) || null,
+      belongingStoreName: storeRaw,
+      store: matchStoreName(storeRaw) || storeRaw,
+      joinDate,
+      startDate: joinDate,
+      startMonth: monthOfIsoDate(joinDate),
+      planName: String(rowValue(row, ["契約プラン名", "プラン名"]) || "").trim(),
+      planContractDate: parseCounselingDate(rowValue(row, ["プラン契約日"])),
+      planStartDate: parseCounselingDate(rowValue(row, ["プラン契約適用開始日"])),
+      planEndDate: parseCounselingDate(rowValue(row, ["プラン契約適用終了日"])),
+      cancellationRequestDate,
+      statusCategory: cancellationRequestDate ? "退会予定" : "契約中",
+    };
+    map.set(memberId, activeMember);
+  }
+  const rows = [...map.values()];
+  stats.validCount = rows.length;
+  stats.excludedCount = stats.rowCount - stats.validCount;
+  return { rows, stats };
+}
+function counselingStatusIsCheckedIn(status) {
+  return String(status || "").trim() === "チェックイン";
+}
+function counselingStatusIsReserved(status) {
+  const s = String(status || "").trim();
+  return s === "チェックイン" || s === "予約済み";
+}
+function counselingTicketStage(ticketRaw) {
+  const ticket = String(ticketRaw || "").trim();
+  if (ticket === "初回カウンセリング") return 1;
+  if (ticket === "２回目カウンセリング") return 2;
+  if (ticket === "３回目カウンセリング") return 3;
+  if (ticket === "４回目以降カウンセリング") return 4;
+  return 0;
+}
+function counselingStageLabel(stage) {
+  if (stage >= 4) return "4回目以降";
+  return `${stage || 0}回`;
+}
+function nextCounselingName(stage) {
+  if (stage <= 0) return "初回カウンセリング";
+  if (stage === 1) return "２回目カウンセリング";
+  if (stage === 2) return "３回目カウンセリング";
+  return "４回目以降カウンセリング";
+}
+function latestCounselingRow(rows) {
+  return [...rows].sort((a, b) => {
+    const d = String(b.lessonDate || "").localeCompare(String(a.lessonDate || ""));
+    if (d) return d;
+    return String(b.startTime || "").localeCompare(String(a.startTime || ""));
+  })[0] || null;
+}
+function buildActiveCounselingProgress(activeMembersValue, reservationsValue) {
+  const reservationsByMember = new Map();
+  for (const r of normalizeCounselingReservations(reservationsValue)) {
+    if (!r?.memberId || !isCounselingTicket(r.ticket)) continue;
+    if (!reservationsByMember.has(r.memberId)) reservationsByMember.set(r.memberId, []);
+    reservationsByMember.get(r.memberId).push(r);
+  }
+  return normalizeCounselingActiveMembers(activeMembersValue).map((member) => {
+    const memberReservations = reservationsByMember.get(member.memberId) || [];
+    const checkedIn = memberReservations.filter((r) => counselingStatusIsCheckedIn(r.reservationStatus));
+    const reservedIncluded = memberReservations.filter((r) => counselingStatusIsReserved(r.reservationStatus));
+    const checkedStage = Math.max(0, ...checkedIn.map((r) => counselingTicketStage(r.ticket)));
+    const reservedStage = Math.max(0, ...reservedIncluded.map((r) => counselingTicketStage(r.ticket)));
+    const checkedByStage = {};
+    for (const r of checkedIn) {
+      const stage = counselingTicketStage(r.ticket);
+      if (!stage) continue;
+      const key = Math.min(stage, 4);
+      const current = checkedByStage[key];
+      if (!current || String(r.lessonDate || "").localeCompare(String(current.lessonDate || "")) > 0) checkedByStage[key] = r;
+    }
+    const latest = latestCounselingRow(checkedIn);
+    return {
+      ...member,
+      checkedStage,
+      reservedStage,
+      finalCounselingDate: latest?.lessonDate || null,
+      nextCounseling: nextCounselingName(checkedStage),
+      firstCounselingDate: checkedByStage[1]?.lessonDate || null,
+      secondCounselingDate: checkedByStage[2]?.lessonDate || null,
+      thirdCounselingDate: checkedByStage[3]?.lessonDate || null,
+      fourthPlusCounselingDate: checkedByStage[4]?.lessonDate || null,
+      finalCounselingName: latest?.ticket || "",
+      finalCounselingStartTime: latest?.startTime || "",
+      finalCounselingStaffName: latest?.staffName || "",
+    };
+  }).sort((a, b) => (
+    (a.checkedStage - b.checkedStage) ||
+    String(a.startDate || "9999-99-99").localeCompare(String(b.startDate || "9999-99-99")) ||
+    (a.statusCategory === "退会予定" ? -1 : b.statusCategory === "退会予定" ? 1 : 0) ||
+    String(a.memberId).localeCompare(String(b.memberId))
+  ));
+}
 function cancellationRowsOf(data) {
   const value = data?.cancellations;
   if (Array.isArray(value)) return value;
@@ -1021,6 +1156,7 @@ const SK = {
   cancellations: "cancellations",
   counselingReservations: "counseling:reservations",
   counselingMeta: "counseling:meta",
+  counselingActiveMembers: "counseling:activeMembers",
 };
 function withTimeout(promise, ms, label) {
   return new Promise((resolve, reject) => {
@@ -1056,10 +1192,10 @@ async function ensureSeeded() {
   return true;
 }
 async function loadAllData() {
-  const [staff, trials, joins, memberMonthly, baselines, budgetTargets, revenueActuals, settings, cancellations, counselingReservations, counselingMeta] = await Promise.all([
+  const [staff, trials, joins, memberMonthly, baselines, budgetTargets, revenueActuals, settings, cancellations, counselingReservations, counselingMeta, counselingActiveMembers] = await Promise.all([
     sGet(SK.staff), sGet(SK.trials), sGet(SK.joins), sGet(SK.memberMonthly),
     sGet(SK.baselines), sGet(SK.budgetTargets), sGet(SK.revenueActuals), sGet(SK.settings),
-    sGet(SK.cancellations), sGet(SK.counselingReservations), sGet(SK.counselingMeta),
+    sGet(SK.cancellations), sGet(SK.counselingReservations), sGet(SK.counselingMeta), sGet(SK.counselingActiveMembers),
   ]);
   return {
     staff: staff || SEED_DATA.staff,
@@ -1073,6 +1209,7 @@ async function loadAllData() {
     cancellations: cancellations || { rows: [], importedAt: null, source: null },
     counselingReservations: normalizeCounselingReservations(counselingReservations),
     counselingMeta: normalizeCounselingMeta(counselingMeta),
+    counselingActiveMembers: normalizeCounselingActiveMembers(counselingActiveMembers),
   };
 }
 // read-modify-write: 同時編集での上書きリスクを下げる
@@ -3124,6 +3261,254 @@ function DataEntryView({ data, updateData, showToast }) {
   );
 }
 
+function CounselingStatLine({ label, value }) {
+  return <span>{label} <b className="num">{value}</b></span>;
+}
+
+function ActiveMemberImportPanel({ data, updateData, showToast }) {
+  const [csvText, setCsvText] = useState("");
+  const [preview, setPreview] = useState(null);
+  const [fileName, setFileName] = useState("");
+  const fileRef = useRef(null);
+  const activeMembers = normalizeCounselingActiveMembers(data.counselingActiveMembers);
+
+  const reset = () => {
+    setCsvText("");
+    setPreview(null);
+    setFileName("");
+    if (fileRef.current) fileRef.current.value = "";
+  };
+
+  const doParse = useCallback((text, name = "") => {
+    const clean = text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    Papa.parse(clean, {
+      header: true,
+      skipEmptyLines: true,
+      complete: (res) => {
+        const rawRows = res.data || [];
+        const parsed = parseCounselingActiveMembers(rawRows);
+        setPreview({
+          rows: parsed.rows,
+          stats: parsed.stats,
+          filename: name || "貼り付けCSV",
+        });
+      },
+      error: () => showToast("CSVの解析に失敗しました。", true),
+    });
+  }, [showToast]);
+
+  const onFile = useCallback((e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setFileName(f.name);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = ev.target.result;
+      setCsvText(text);
+      doParse(text, f.name);
+    };
+    reader.onerror = () => showToast("ファイルの読み込みに失敗しました。", true);
+    reader.readAsText(f, "UTF-8");
+  }, [doParse, showToast]);
+
+  const onParseText = useCallback(() => {
+    if (csvText.trim()) doParse(csvText, fileName);
+  }, [csvText, doParse, fileName]);
+
+  const handleImport = async () => {
+    if (!preview) {
+      showToast("CSVを読み込んでください。", true);
+      return;
+    }
+    if (!preview.rows.length) {
+      showToast("保存対象の在籍者データがありません。", true);
+      return;
+    }
+    await updateData("counselingActiveMembers", () => preview.rows);
+    showToast(`在籍者 ${preview.rows.length}件を保存しました`);
+    reset();
+  };
+
+  return (
+    <div className="f4h-card" style={{ padding: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+        <Upload size={16} /><div style={{ fontWeight: 700, fontSize: 14 }}>hacomono「メンバー一覧（契約中）」CSVを取り込む</div>
+      </div>
+      <p style={{ fontSize: 12.5, color: "var(--ink-faint)", margin: "2px 0 14px", lineHeight: 1.7 }}>
+        契約中CSVは現在の在籍者スナップショットとして全置換保存します。店舗判定は「所属店舗名」、利用開始日は「入会日時」を使います。退会手続き日がある行も除外せず、退会予定として表示します。
+      </p>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+        <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} onClick={() => fileRef.current?.click()}>
+          <Upload size={14} /> CSVファイルを選択
+        </button>
+        <input ref={fileRef} type="file" accept=".csv,text/csv" style={{ display: "none" }} onChange={onFile} />
+        <span style={{ fontSize: 12, color: "var(--ink-faint)", alignSelf: "center" }}>または下に貼り付け</span>
+      </div>
+      <textarea className="f4h-input" rows={4} placeholder="メンバー一覧（契約中）CSVの内容をここに貼り付け..."
+        style={{ resize: "vertical", fontFamily: "monospace", fontSize: 12 }}
+        value={csvText} onChange={(e) => setCsvText(e.target.value)} />
+      <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "8px 16px" }} onClick={onParseText} disabled={!csvText.trim()}>
+          読み込む
+        </button>
+        <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} disabled={!csvText && !preview} onClick={reset}>
+          <X size={13} /> リセット
+        </button>
+      </div>
+
+      {preview && (
+        <div className="f4h-fade-in" style={{ marginTop: 18, borderTop: "1px solid var(--border-soft)", paddingTop: 16 }}>
+          <div style={{ display: "flex", gap: 14, fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 8, flexWrap: "wrap" }}>
+            <CounselingStatLine label="今回取込の総行数" value={`${preview.stats.rowCount}件`} />
+            <CounselingStatLine label="有効件数" value={`${preview.stats.validCount}件`} />
+            <CounselingStatLine label="対象外件数" value={`${preview.stats.excludedCount}件`} />
+            <CounselingStatLine label="メンバーID空欄除外" value={`${preview.stats.blankMemberIdCount}件`} />
+            <CounselingStatLine label="メンバーID重複" value={`${preview.stats.duplicateMemberIdCount}件`} />
+            <span>ファイル <b>{preview.filename}</b></span>
+          </div>
+          {preview.rows.length === 0 ? (
+            <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginBottom: 10 }}>
+              <AlertTriangle size={14} /> 保存対象の在籍者データが見つかりません。
+            </div>
+          ) : (
+            <>
+              <div className="scrollbar-thin" style={{ maxHeight: 220, overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8, marginBottom: 12 }}>
+                <table className="f4h-table">
+                  <thead><tr><th>メンバーID</th><th>氏名</th><th>店舗</th><th>ステータス</th><th>利用開始日</th><th>利用開始月</th><th>契約プラン</th></tr></thead>
+                  <tbody>
+                    {preview.rows.slice(0, 50).map((r) => (
+                      <tr key={r.memberId}>
+                        <td>{r.memberId}</td>
+                        <td style={{ textAlign: "left" }}>{r.name || "—"}</td>
+                        <td style={{ textAlign: "left" }}>{r.store || "—"}</td>
+                        <td>{r.statusCategory}</td>
+                        <td>{r.startDate || "—"}</td>
+                        <td>{r.startMonth || "—"}</td>
+                        <td style={{ textAlign: "left" }}>{r.planName || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "9px 18px" }} onClick={handleImport}>
+                <Check size={15} /> 在籍者 {preview.rows.length}件を保存する
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      <div style={{ marginTop: 14, fontSize: 12.5, color: "var(--ink-soft)" }}>
+        保存済み在籍者データ <b className="num">{activeMembers.length}</b>件
+      </div>
+    </div>
+  );
+}
+
+function CounselingKpiCard({ label, value, sub }) {
+  return (
+    <div className="f4h-card" style={{ padding: 14, minHeight: 86 }}>
+      <div style={{ fontSize: 11.5, color: "var(--ink-faint)", marginBottom: 6 }}>{label}</div>
+      <div className="num" style={{ fontSize: 24, fontWeight: 800, lineHeight: 1 }}>{value}</div>
+      {sub && <div style={{ marginTop: 7, fontSize: 11.5, color: "var(--ink-soft)" }}>{sub}</div>}
+    </div>
+  );
+}
+
+function ActiveCounselingProgressSection({ data }) {
+  const [storeFilter, setStoreFilter] = useState("all");
+  const progressRows = useMemo(
+    () => buildActiveCounselingProgress(data.counselingActiveMembers, data.counselingReservations),
+    [data.counselingActiveMembers, data.counselingReservations]
+  );
+  const filteredRows = useMemo(
+    () => storeFilter === "all" ? progressRows : progressRows.filter((row) => row.store === storeFilter),
+    [progressRows, storeFilter]
+  );
+  const total = filteredRows.length;
+  const stageCounts = [0, 1, 2, 3, 4].map((stage) => (
+    stage === 4 ? filteredRows.filter((row) => row.checkedStage >= 4).length : filteredRows.filter((row) => row.checkedStage === stage).length
+  ));
+  const reached3 = filteredRows.filter((row) => row.checkedStage >= 3).length;
+  const under3 = filteredRows.filter((row) => row.checkedStage < 3).length;
+  const under4 = filteredRows.filter((row) => row.checkedStage < 4).length;
+  const retiring = filteredRows.filter((row) => row.statusCategory === "退会予定").length;
+
+  return (
+    <div className="f4h-card" style={{ padding: 18 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap", marginBottom: 14 }}>
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink-faint)", letterSpacing: ".05em", marginBottom: 4 }}>在籍者分析</div>
+          <div style={{ fontSize: 20, fontWeight: 800 }}>在籍者のカウンセリング進捗</div>
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <Pill active={storeFilter === "all"} onClick={() => setStoreFilter("all")}>全店</Pill>
+          {STORE_KEYS.map((store) => (
+            <Pill key={store} active={storeFilter === store} onClick={() => setStoreFilter(store)}>{store}</Pill>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(132px, 1fr))", gap: 10, marginBottom: 14 }}>
+        <CounselingKpiCard label="在籍者数" value={`${num(total)}人`} />
+        <CounselingKpiCard label="0回" value={`${num(stageCounts[0])}人`} />
+        <CounselingKpiCard label="1回" value={`${num(stageCounts[1])}人`} />
+        <CounselingKpiCard label="2回" value={`${num(stageCounts[2])}人`} />
+        <CounselingKpiCard label="3回" value={`${num(stageCounts[3])}人`} />
+        <CounselingKpiCard label="4回目以降" value={`${num(stageCounts[4])}人`} />
+        <CounselingKpiCard label="3回目到達率" value={total ? pct1(reached3 / total) : "—"} />
+        <CounselingKpiCard label="3回未満人数" value={`${num(under3)}人`} />
+        <CounselingKpiCard label="4回目以降未到達人数" value={`${num(under4)}人`} />
+        <CounselingKpiCard label="退会予定者数" value={`${num(retiring)}人`} />
+      </div>
+
+      <p style={{ fontSize: 12.5, color: "var(--ink-faint)", lineHeight: 1.7, margin: "0 0 14px" }}>
+        在籍者は「入会日時」を利用開始日として集計しています。「最終カウンセリング日」は、自由枠：予約一覧のカウンセリング系予約でチェックインした最新受講日です。無料スタジオレッスン等の最終受講日は含みません。
+      </p>
+
+      {filteredRows.length === 0 ? (
+        <EmptyState title="在籍者データがありません" sub="メンバー一覧（契約中）CSVを取り込むと、予約一覧CSVとメンバーIDで突合して表示します。" />
+      ) : (
+        <div className="scrollbar-thin" style={{ overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8 }}>
+          <table className="f4h-table">
+            <thead>
+              <tr>
+                <th>メンバーID</th><th>氏名</th><th>店舗</th><th>ステータス区分</th><th>利用開始日</th><th>利用開始月</th>
+                <th>受講済み到達段階</th><th>予約込み到達段階</th><th>最終カウンセリング日</th><th>次回必要カウンセリング</th>
+                <th>初回カウンセリング日</th><th>2回目カウンセリング日</th><th>3回目カウンセリング日</th><th>4回目以降カウンセリング日</th>
+                <th>最終カウンセリング名</th><th>最終カウンセリング開始時刻</th><th>最終カウンセリング担当スタッフ</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredRows.map((row) => (
+                <tr key={row.memberId} style={row.statusCategory === "退会予定" ? { background: "var(--amber-soft)" } : undefined}>
+                  <td>{row.memberId}</td>
+                  <td style={{ textAlign: "left" }}>{row.name || "—"}</td>
+                  <td style={{ textAlign: "left" }}>{row.store || "—"}</td>
+                  <td>{row.statusCategory}</td>
+                  <td>{row.startDate || "—"}</td>
+                  <td>{row.startMonth || "—"}</td>
+                  <td>{counselingStageLabel(row.checkedStage)}</td>
+                  <td>{counselingStageLabel(row.reservedStage)}</td>
+                  <td>{row.finalCounselingDate || "—"}</td>
+                  <td style={{ textAlign: "left" }}>{row.nextCounseling}</td>
+                  <td>{row.firstCounselingDate || "—"}</td>
+                  <td>{row.secondCounselingDate || "—"}</td>
+                  <td>{row.thirdCounselingDate || "—"}</td>
+                  <td>{row.fourthPlusCounselingDate || "—"}</td>
+                  <td style={{ textAlign: "left" }}>{row.finalCounselingName || "—"}</td>
+                  <td>{row.finalCounselingStartTime || "—"}</td>
+                  <td style={{ textAlign: "left" }}>{row.finalCounselingStaffName || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CounselingAnalysisView({ data, updateData, showToast }) {
   const [csvText, setCsvText] = useState("");
   const [preview, setPreview] = useState(null);
@@ -3303,6 +3688,8 @@ function CounselingAnalysisView({ data, updateData, showToast }) {
           )}
         </div>
       </div>
+      <ActiveMemberImportPanel data={data} updateData={updateData} showToast={showToast} />
+      <ActiveCounselingProgressSection data={data} />
     </div>
   );
 }
@@ -3813,6 +4200,7 @@ export default function App() {
     cancellations: { rows: [], importedAt: null, source: null },
     counselingReservations: [],
     counselingMeta: normalizeCounselingMeta(null),
+    counselingActiveMembers: [],
   }));
   const [syncing, setSyncing] = useState(true);
   const [nav, setNav] = useState("dashboard");
@@ -3862,6 +4250,7 @@ export default function App() {
       cancellations: { rows: [], importedAt: null, source: null },
       counselingReservations: [],
       counselingMeta: normalizeCounselingMeta(null),
+      counselingActiveMembers: [],
     };
     await Promise.all(Object.keys(empty).map((k) => sSet(SK[k], empty[k])));
     await sSet(SK.meta, { initialized: true, seededAt: new Date().toISOString(), version: 1, resetAt: new Date().toISOString() });
