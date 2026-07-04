@@ -738,8 +738,45 @@ function exactRowValue(row, names) {
   }
   return "";
 }
+function normalizedCsvHeaderName(value) {
+  return String(value ?? "")
+    .replace(/^\uFEFF/, "")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .trim()
+    .replace(/[　\s_＿]/g, "");
+}
+function activeMemberRowValue(row, names, { exact = false } = {}) {
+  const keys = Object.keys(row || {});
+  const normalizedNames = names.map(normalizedCsvHeaderName);
+  for (const key of keys) {
+    const normalizedKey = normalizedCsvHeaderName(key);
+    const index = normalizedNames.findIndex((name) => normalizedKey === name);
+    if (index >= 0) return row[key];
+  }
+  if (exact) return "";
+  for (const key of keys) {
+    const normalizedKey = normalizedCsvHeaderName(key);
+    const index = normalizedNames.findIndex((name) => normalizedKey.includes(name));
+    if (index >= 0) return row[key];
+  }
+  return "";
+}
 function normalizeCounselingActiveMembers(value) {
-  return Array.isArray(value) ? value : [];
+  if (Array.isArray(value)) return value;
+  if (Array.isArray(value?.rows)) return value.rows;
+  return [];
+}
+function normalizeCounselingActiveMembersMeta(value) {
+  if (value && typeof value === "object" && !Array.isArray(value) && value.meta) return value.meta;
+  return {
+    importedAt: null,
+    filename: null,
+    rowCount: 0,
+    validCount: 0,
+    excludedCount: 0,
+    blankMemberIdCount: 0,
+    duplicateMemberIdCount: 0,
+  };
 }
 function parseCounselingActiveMembers(rawRows) {
   const map = new Map();
@@ -751,7 +788,7 @@ function parseCounselingActiveMembers(rawRows) {
     duplicateMemberIdCount: 0,
   };
   for (const row of rawRows) {
-    const memberId = normalizeMemberId(rowValue(row, ["メンバーID", "会員ID", "メンバー_ID"]));
+    const memberId = normalizeMemberId(activeMemberRowValue(row, ["メンバーID", "会員ID", "メンバー_ID", "会員番号"]));
     if (!memberId) {
       stats.blankMemberIdCount += 1;
       continue;
@@ -760,23 +797,23 @@ function parseCounselingActiveMembers(rawRows) {
       stats.duplicateMemberIdCount += 1;
       console.warn("[counseling] duplicate active member id; later row wins", memberId);
     }
-    const storeRaw = String(exactRowValue(row, ["所属店舗名"]) || "").trim();
-    const joinDate = parseCounselingDate(rowValue(row, ["入会日時", "入会日"]));
-    const cancellationRequestDate = parseCounselingDate(rowValue(row, ["退会手続き日"]));
+    const storeRaw = String(activeMemberRowValue(row, ["所属店舗名"], { exact: true }) || "").trim();
+    const joinDate = parseCounselingDate(activeMemberRowValue(row, ["入会日時"]));
+    const cancellationRequestDate = parseCounselingDate(activeMemberRowValue(row, ["退会手続き日"]));
     const activeMember = {
       memberId,
-      name: String(rowValue(row, ["氏名", "名前", "会員名", "メンバー名"]) || "").trim(),
-      gender: String(rowValue(row, ["性別"]) || "").trim(),
-      age: Number(rowValue(row, ["年齢"])) || null,
+      name: String(activeMemberRowValue(row, ["氏名", "名前", "会員名", "メンバー名"]) || "").trim(),
+      gender: String(activeMemberRowValue(row, ["性別"]) || "").trim(),
+      age: Number(activeMemberRowValue(row, ["年齢"])) || null,
       belongingStoreName: storeRaw,
       store: matchStoreName(storeRaw) || storeRaw,
       joinDate,
       startDate: joinDate,
       startMonth: monthOfIsoDate(joinDate),
-      planName: String(rowValue(row, ["契約プラン名", "プラン名"]) || "").trim(),
-      planContractDate: parseCounselingDate(rowValue(row, ["プラン契約日"])),
-      planStartDate: parseCounselingDate(rowValue(row, ["プラン契約適用開始日"])),
-      planEndDate: parseCounselingDate(rowValue(row, ["プラン契約適用終了日"])),
+      planName: String(activeMemberRowValue(row, ["契約プラン名", "プラン名"]) || "").trim(),
+      planContractDate: parseCounselingDate(activeMemberRowValue(row, ["プラン契約日"])),
+      planStartDate: parseCounselingDate(activeMemberRowValue(row, ["プラン契約適用開始日"])),
+      planEndDate: parseCounselingDate(activeMemberRowValue(row, ["プラン契約適用終了日"])),
       cancellationRequestDate,
       statusCategory: cancellationRequestDate ? "退会予定" : "契約中",
     };
@@ -1209,7 +1246,9 @@ async function loadAllData() {
     cancellations: cancellations || { rows: [], importedAt: null, source: null },
     counselingReservations: normalizeCounselingReservations(counselingReservations),
     counselingMeta: normalizeCounselingMeta(counselingMeta),
-    counselingActiveMembers: normalizeCounselingActiveMembers(counselingActiveMembers),
+    counselingActiveMembers: counselingActiveMembers && typeof counselingActiveMembers === "object" && !Array.isArray(counselingActiveMembers)
+      ? { rows: normalizeCounselingActiveMembers(counselingActiveMembers), meta: normalizeCounselingActiveMembersMeta(counselingActiveMembers) }
+      : normalizeCounselingActiveMembers(counselingActiveMembers),
   };
 }
 // read-modify-write: 同時編集での上書きリスクを下げる
@@ -3271,6 +3310,7 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
   const [fileName, setFileName] = useState("");
   const fileRef = useRef(null);
   const activeMembers = normalizeCounselingActiveMembers(data.counselingActiveMembers);
+  const activeMembersMeta = normalizeCounselingActiveMembersMeta(data.counselingActiveMembers);
 
   const reset = () => {
     setCsvText("");
@@ -3324,7 +3364,14 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
       showToast("保存対象の在籍者データがありません。", true);
       return;
     }
-    await updateData("counselingActiveMembers", () => preview.rows);
+    await updateData("counselingActiveMembers", () => ({
+      rows: preview.rows,
+      meta: {
+        importedAt: new Date().toISOString(),
+        filename: preview.filename,
+        ...preview.stats,
+      },
+    }));
     showToast(`在籍者 ${preview.rows.length}件を保存しました`);
     reset();
   };
@@ -3399,7 +3446,15 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
       )}
 
       <div style={{ marginTop: 14, fontSize: 12.5, color: "var(--ink-soft)" }}>
-        保存済み在籍者データ <b className="num">{activeMembers.length}</b>件
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+          <CounselingStatLine label="保存済み在籍者データ 合計" value={`${activeMembers.length}件`} />
+          <CounselingStatLine label="最終取込日時" value={activeMembersMeta.importedAt ? new Date(activeMembersMeta.importedAt).toLocaleString("ja-JP") : "—"} />
+          <CounselingStatLine label="直近取込ファイル名" value={activeMembersMeta.filename || "—"} />
+          <CounselingStatLine label="今回取込の総行数" value={`${activeMembersMeta.rowCount || 0}件`} />
+          <CounselingStatLine label="有効件数" value={`${activeMembersMeta.validCount || activeMembers.length || 0}件`} />
+          <CounselingStatLine label="メンバーID空欄除外" value={`${activeMembersMeta.blankMemberIdCount || 0}件`} />
+          <CounselingStatLine label="重複除外/上書き" value={`${activeMembersMeta.duplicateMemberIdCount || 0}件`} />
+        </div>
       </div>
     </div>
   );
