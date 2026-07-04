@@ -599,6 +599,26 @@ function mergeCancellationImport(currentValue, parsed, source) {
     source,
   };
 }
+function deleteCancellationMonth(currentValue, ym) {
+  const current = normalizeCancellations(currentValue);
+  const imports = { ...current.imports };
+  delete imports[ym];
+  return {
+    ...current,
+    rows: current.rows.filter((row) => cancellationMonthOf(row) !== ym),
+    imports,
+  };
+}
+function deleteAllCancellations(currentValue) {
+  const current = normalizeCancellations(currentValue);
+  return {
+    ...current,
+    rows: [],
+    imports: {},
+    importedAt: null,
+    source: null,
+  };
+}
 const COUNSELING_TICKETS = [
   "初回カウンセリング",
   "２回目カウンセリング",
@@ -916,6 +936,30 @@ function mergeCounselingMemberMonthImport(currentValue, importedRows, stats, fil
       importedAt,
       filename: filename || null,
       ...(stats || {}),
+    },
+  };
+}
+function deleteCounselingMemberMonth(currentValue, ym, monthOf, normalizeRows, normalizeMeta) {
+  const rows = normalizeRows(currentValue);
+  const imports = normalizeCounselingMemberImports(currentValue).filter((item) => {
+    const months = Array.isArray(item?.months) ? item.months : [item?.month].filter(Boolean);
+    return !months.includes(ym);
+  });
+  return {
+    rows: rows.filter((row) => monthOf(row) !== ym),
+    imports,
+    meta: normalizeMeta(currentValue),
+  };
+}
+function deleteAllCounselingMembers(currentValue, normalizeMeta) {
+  return {
+    rows: [],
+    imports: [],
+    meta: {
+      ...normalizeMeta(currentValue),
+      rowCount: 0,
+      validCount: 0,
+      excludedCount: 0,
     },
   };
 }
@@ -3459,6 +3503,16 @@ function CancellationImportPanel({ data, updateData, showToast }) {
     showToast(`退会者データ ${preview.rows.length}件を保存し、カウンセリング分析用退会者データ ${counselingRows.length}件も更新しました`);
     reset();
   };
+  const handleDeleteMonth = async (ym, count) => {
+    if (!window.confirm(`${cancellationMonthLabel(ym)}の退会者データ${count}件を削除します。よろしいですか？`)) return;
+    await updateData("cancellations", (cur) => deleteCancellationMonth(cur, ym));
+    showToast(`${cancellationMonthLabel(ym)}の退会者データを削除しました`);
+  };
+  const handleDeleteAll = async () => {
+    if (!window.confirm("保存済み退会者データをすべて削除します。よろしいですか？この操作は元に戻せません。")) return;
+    await updateData("cancellations", (cur) => deleteAllCancellations(cur));
+    showToast("保存済み退会者データをすべて削除しました");
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -3552,12 +3606,22 @@ function CancellationImportPanel({ data, updateData, showToast }) {
                   <span key={item.ym} style={{ display: "inline-flex", gap: 5, alignItems: "center", padding: "5px 9px", border: "1px solid var(--border-soft)", borderRadius: 999, background: "var(--surface-soft)", fontSize: 12, color: "var(--ink-soft)" }} title={imported?.filename || ""}>
                     <b>{cancellationMonthLabel(item.ym)}</b>
                     <span className="num">{item.count}</span>件
+                    <button type="button" className="f4h-btn f4h-btn-ghost f4h-focus" style={{ padding: 2, minHeight: 0, color: "var(--red)" }} title={`${cancellationMonthLabel(item.ym)}を削除`} onClick={() => handleDeleteMonth(item.ym, item.count)}>
+                      <Trash2 size={13} />
+                    </button>
                   </span>
                 );
               })}
             </div>
           )}
         </div>
+        {current.rows?.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <button type="button" className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "7px 12px", color: "var(--red)" }} onClick={handleDeleteAll}>
+              <Trash2 size={14} /> 退会者データをすべて削除
+            </button>
+          </div>
+        )}
         <div style={{ marginTop: 10, fontSize: 11.5, color: "var(--ink-faint)", lineHeight: 1.7 }}>
           退会手続き日がないデータも保存します。将来の週別サマリー・退会前未回来期間分析では、退会手続き日がある明細のみを対象にします。
         </div>
@@ -3914,7 +3978,24 @@ function CounselingDataImportSection({ data, updateData, showToast }) {
   const newMembersMeta = normalizeCounselingNewMembersMeta(data.counselingNewMembers);
   const cancelMembers = normalizeCounselingCancelMembers(data.counselingCancelMembers);
   const cancelMembersMeta = normalizeCounselingCancelMembersMeta(data.counselingCancelMembers);
+  const cancelMemberMonthCounts = monthlyCounselingMemberCounts(cancelMembers, counselingCancelMemberMonthOf);
   const metaTime = (value) => value ? new Date(value).toLocaleString("ja-JP") : "—";
+  const handleDeleteCancelMemberMonth = async (ym, count) => {
+    if (!window.confirm(`${cancellationMonthLabel(ym)}のカウンセリング分析用退会者データ${count}件を削除します。よろしいですか？`)) return;
+    await updateData("counselingCancelMembers", (cur) => deleteCounselingMemberMonth(
+      cur,
+      ym,
+      counselingCancelMemberMonthOf,
+      normalizeCounselingCancelMembers,
+      normalizeCounselingCancelMembersMeta
+    ));
+    showToast(`${cancellationMonthLabel(ym)}のカウンセリング分析用退会者データを削除しました`);
+  };
+  const handleDeleteAllCancelMembers = async () => {
+    if (!window.confirm("カウンセリング分析用退会者データをすべて削除します。よろしいですか？この操作は元に戻せません。")) return;
+    await updateData("counselingCancelMembers", (cur) => deleteAllCounselingMembers(cur, normalizeCounselingCancelMembersMeta));
+    showToast("カウンセリング分析用退会者データをすべて削除しました");
+  };
   return (
     <div className="f4h-fade-in" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <SectionHeading eyebrow="カウンセリング分析用データ" title="カウンセリング分析用データ" />
@@ -3950,6 +4031,30 @@ function CounselingDataImportSection({ data, updateData, showToast }) {
           <CounselingStatLine label="最終取込日時" value={metaTime(cancelMembersMeta.importedAt || cancelMembersMeta.lastImportedAt)} />
           <CounselingStatLine label="直近取込ファイル名" value={cancelMembersMeta.filename || cancelMembersMeta.lastFileName || "—"} />
         </div>
+        <div style={{ marginTop: 10 }}>
+          <div style={{ fontWeight: 700, fontSize: 12, color: "var(--ink-faint)", marginBottom: 4 }}>登録済み退会月</div>
+          {cancelMemberMonthCounts.length ? (
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {cancelMemberMonthCounts.map(({ ym, count }) => (
+                <span key={ym} style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 8px", border: "1px solid var(--border-soft)", borderRadius: 999, background: "var(--surface-soft)", fontSize: 12 }}>
+                  {cancellationMonthLabel(ym)} {count}件
+                  <button type="button" className="f4h-btn f4h-btn-ghost f4h-focus" style={{ padding: 2, minHeight: 0, color: "var(--red)" }} title={`${cancellationMonthLabel(ym)}を削除`} onClick={() => handleDeleteCancelMemberMonth(ym, count)}>
+                    <Trash2 size={13} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : (
+            <div style={{ color: "var(--ink-faint)", fontSize: 12 }}>—</div>
+          )}
+        </div>
+        {cancelMembers.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <button type="button" className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "7px 12px", color: "var(--red)" }} onClick={handleDeleteAllCancelMembers}>
+              <Trash2 size={14} /> カウンセリング分析用退会者データをすべて削除
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -4322,6 +4427,22 @@ function NewMemberImportPanel({ data, updateData, showToast }) {
     showToast(`新規入会者 ${newMembersImportStats.rows.length}件を保存しました`);
     reset();
   };
+  const handleDeleteMonth = async (ym, count) => {
+    if (!window.confirm(`${cancellationMonthLabel(ym)}の新規入会者データ${count}件を削除します。よろしいですか？`)) return;
+    await updateData("counselingNewMembers", (cur) => deleteCounselingMemberMonth(
+      cur,
+      ym,
+      counselingNewMemberMonthOf,
+      normalizeCounselingNewMembers,
+      normalizeCounselingNewMembersMeta
+    ));
+    showToast(`${cancellationMonthLabel(ym)}の新規入会者データを削除しました`);
+  };
+  const handleDeleteAll = async () => {
+    if (!window.confirm("新規入会者データをすべて削除します。よろしいですか？この操作は元に戻せません。")) return;
+    await updateData("counselingNewMembers", (cur) => deleteAllCounselingMembers(cur, normalizeCounselingNewMembersMeta));
+    showToast("新規入会者データをすべて削除しました");
+  };
 
   return (
     <div className="f4h-card" style={{ padding: 18 }}>
@@ -4442,8 +4563,11 @@ function NewMemberImportPanel({ data, updateData, showToast }) {
           {newMemberMonthCounts.length ? (
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               {newMemberMonthCounts.map(({ ym, count }) => (
-                <span key={ym} style={{ padding: "4px 8px", border: "1px solid var(--border-soft)", borderRadius: 999, background: "var(--surface-soft)" }}>
+                <span key={ym} style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 8px", border: "1px solid var(--border-soft)", borderRadius: 999, background: "var(--surface-soft)" }}>
                   {cancellationMonthLabel(ym)} {count}件
+                  <button type="button" className="f4h-btn f4h-btn-ghost f4h-focus" style={{ padding: 2, minHeight: 0, color: "var(--red)" }} title={`${cancellationMonthLabel(ym)}を削除`} onClick={() => handleDeleteMonth(ym, count)}>
+                    <Trash2 size={13} />
+                  </button>
                 </span>
               ))}
             </div>
@@ -4451,6 +4575,13 @@ function NewMemberImportPanel({ data, updateData, showToast }) {
             <div style={{ color: "var(--ink-faint)" }}>—</div>
           )}
         </div>
+        {newMembers.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <button type="button" className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "7px 12px", color: "var(--red)" }} onClick={handleDeleteAll}>
+              <Trash2 size={14} /> 新規入会者データをすべて削除
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
