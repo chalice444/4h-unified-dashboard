@@ -3322,7 +3322,7 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
   const [activeMembersImportError, setActiveMembersImportError] = useState("");
   const [activeMembersFileName, setActiveMembersFileName] = useState("");
   const [activeMembersSelectedFile, setActiveMembersSelectedFile] = useState(null);
-  const fileRef = useRef(null);
+  const activeMembersFileInputRef = useRef(null);
   const activeMembers = normalizeCounselingActiveMembers(data.counselingActiveMembers);
   const activeMembersMeta = normalizeCounselingActiveMembersMeta(data.counselingActiveMembers);
 
@@ -3332,7 +3332,7 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
     setActiveMembersImportError("");
     setActiveMembersFileName("");
     setActiveMembersSelectedFile(null);
-    if (fileRef.current) fileRef.current.value = "";
+    if (activeMembersFileInputRef.current) activeMembersFileInputRef.current.value = "";
   };
 
   const doParse = useCallback((text, name = "") => {
@@ -3384,6 +3384,7 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
   const handleActiveMembersFileChange = useCallback(async (e) => {
     const f = e.target.files?.[0];
     if (!f) return;
+    console.info("[counseling active import] file selected", f.name, f.size);
     setActiveMembersFileName(f.name);
     setActiveMembersSelectedFile(f);
     setActiveMembersCsvText("");
@@ -3450,10 +3451,20 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
         契約中CSVは現在の在籍者スナップショットとして全置換保存します。店舗判定は「所属店舗名」、利用開始日は「入会日時」を使います。退会手続き日がある行も除外せず、退会予定として表示します。
       </p>
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
-        <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} onClick={() => fileRef.current?.click()}>
+        <button type="button" className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} onClick={() => activeMembersFileInputRef.current?.click()}>
           <Upload size={14} /> CSVファイルを選択
         </button>
-        <input ref={fileRef} type="file" accept=".csv,text/csv" style={{ display: "none" }} onChange={handleActiveMembersFileChange} />
+        <input
+          id="activeMembersCsvInput"
+          name="activeMembersCsvInput"
+          ref={activeMembersFileInputRef}
+          type="file"
+          accept=".csv,text/csv"
+          data-import-handler="activeMembers"
+          style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }}
+          onClick={(e) => { e.currentTarget.value = ""; }}
+          onChange={handleActiveMembersFileChange}
+        />
         <span style={{ fontSize: 12, color: "var(--ink-faint)", alignSelf: "center" }}>または下に貼り付け</span>
       </div>
       <textarea className="f4h-input" rows={4} placeholder="メンバー一覧（契約中）CSVの内容をここに貼り付け..."
@@ -3476,6 +3487,7 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
         <CounselingStatLine label="選択中ファイル名" value={activeMembersFileName || "—"} />
         <CounselingStatLine label="CSV本文文字数" value={`${activeMembersCsvText.length}文字`} />
         <CounselingStatLine label="selectedFile" value={activeMembersSelectedFile ? "あり" : "なし"} />
+        <CounselingStatLine label="handler" value="activeMembers" />
       </div>
       {activeMembersImportError && !activeMembersImportStats && (
         <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginTop: 10 }}>
