@@ -1088,6 +1088,28 @@ function parseCounselingNewMembers(rawRows) {
   stats.excludedCount = stats.rowCount - stats.validCount;
   return { rows, stats };
 }
+function buildCounselingNewMembersFromJoinCsv(rawRows, filename = "入会者データCSV") {
+  const rows = rawRows || [];
+  const parsed = parseCounselingNewMembers(rows);
+  const headerFields = rows[0] ? Object.keys(rows[0]) : [];
+  const hasBelongingStore = headerFields.some((h) => String(h).trim() === "所属店舗名");
+  const hasPlanStart = headerFields.some((h) => String(h).includes("プラン契約適用開始日"));
+  const hasJoinDate = headerFields.some((h) => String(h).includes("入会日時"));
+  const warnings = [];
+  if (!hasBelongingStore) warnings.push("所属店舗名列が見つかりません。");
+  if (!hasPlanStart && !hasJoinDate) warnings.push("利用開始日の判定に必要な列が見つかりません。");
+  if (parsed.stats.blankMemberIdCount) warnings.push(`メンバーID空欄 ${parsed.stats.blankMemberIdCount}件を除外しました。`);
+  if (parsed.stats.unknownStartDateCount) warnings.push(`利用開始日不明 ${parsed.stats.unknownStartDateCount}件があります。`);
+  return {
+    ...parsed,
+    stats: {
+      ...parsed.stats,
+      headerFields,
+    },
+    filename,
+    warnings,
+  };
+}
 function parseCounselingCancelMembers(rawRows, newMembersValue) {
   const newMembersById = new Map(normalizeCounselingNewMembers(newMembersValue).map((member) => [member.memberId, member]));
   const map = new Map();
@@ -3280,6 +3302,8 @@ function JoinImportPanel({ data, updateData, showToast }) {
   const [delTarget, setDelTarget] = useState(null);
   const [search, setSearch] = useState("");
   const [visibleCount, setVisibleCount] = useState(40);
+  const [importSourceName, setImportSourceName] = useState("貼り付けCSV");
+  const [counselingSyncWarning, setCounselingSyncWarning] = useState("");
   const fileRef = useRef(null);
 
   const doParse = useCallback((text) => {
@@ -3303,13 +3327,21 @@ function JoinImportPanel({ data, updateData, showToast }) {
     reader.onload = (ev) => {
       const text = ev.target.result;
       setCsvText(text);
+      setImportSourceName(f.name || "入会者データCSV");
+      setCounselingSyncWarning("");
       doParse(text);
     };
     reader.onerror = () => showToast("ファイルの読み込みに失敗しました。", true);
     reader.readAsText(f, "UTF-8");
   }, [doParse, showToast]);
 
-  const onParseText = useCallback(() => { if (csvText.trim()) doParse(csvText); }, [csvText, doParse]);
+  const onParseText = useCallback(() => {
+    if (csvText.trim()) {
+      setImportSourceName("貼り付けCSV");
+      setCounselingSyncWarning("");
+      doParse(csvText);
+    }
+  }, [csvText, doParse]);
   const setMap = (key, val) => setMapping((m) => ({ ...m, [key]: val }));
 
   const cleaned = useMemo(() => {
@@ -3317,13 +3349,56 @@ function JoinImportPanel({ data, updateData, showToast }) {
     return cleanJoinCsvRows(rawRows, mapping);
   }, [rawRows, mapping]);
   const dedup = useMemo(() => dedupeJoins(cleaned, data.joins), [cleaned, data.joins]);
+  const counselingImport = useMemo(() => {
+    if (!rawRows) return null;
+    return buildCounselingNewMembersFromJoinCsv(rawRows, importSourceName);
+  }, [rawRows, importSourceName]);
   const mappingValid = mapping && mapping.memberId && mapping.effectiveDate;
+  const counselingImportableCount = counselingImport?.rows?.length || 0;
 
   const handleImport = async () => {
-    if (!dedup.accepted.length) { showToast("取り込める新規データがありません。", true); return; }
-    await updateData("joins", (cur) => [...cur, ...dedup.accepted]);
-    showToast(`${dedup.accepted.length}件を取り込みました（重複・不正スキップ${dedup.skipped}件）`);
-    setCsvText(""); setRawRows(null); setHeaders([]); setMapping(null);
+    if (!dedup.accepted.length && !counselingImportableCount) {
+      showToast("取り込める新規データがありません。", true);
+      return;
+    }
+    if (dedup.accepted.length) {
+      await updateData("joins", (cur) => [...cur, ...dedup.accepted]);
+    }
+    let counselingFailed = false;
+    let counselingWarning = "";
+    try {
+      if (counselingImportableCount) {
+        await updateData("counselingNewMembers", (cur) => (
+          mergeCounselingMemberMonthImport(
+            cur,
+            counselingImport.rows,
+            counselingImport.stats,
+            counselingImport.filename,
+            counselingNewMemberMonthOf
+          )
+        ));
+        counselingWarning = counselingImport.warnings?.join(" ") || "";
+      } else {
+        counselingFailed = true;
+        counselingWarning = "カウンセリング分析用新規入会者データの保存対象が見つかりませんでした。";
+      }
+    } catch (error) {
+      counselingFailed = true;
+      counselingWarning = "カウンセリング分析用新規入会者データの反映に失敗しました。";
+      console.warn("[join import] counseling new members sync failed", error);
+    }
+    if (counselingWarning) {
+      console.warn("[join import] counseling new members sync warning", counselingWarning);
+      setCounselingSyncWarning(counselingWarning);
+    } else {
+      setCounselingSyncWarning("");
+    }
+    if (counselingFailed) {
+      showToast("入会者データは保存されましたが、カウンセリング分析用新規入会者データの反映に一部失敗しました。", true);
+    } else {
+      showToast(`CVR用 ${dedup.accepted.length}件 / カウンセリング分析用 ${counselingImportableCount}件を反映しました（重複・不正スキップ${dedup.skipped}件）`);
+    }
+    setCsvText(""); setRawRows(null); setHeaders([]); setMapping(null); setImportSourceName("貼り付けCSV");
     if (fileRef.current) fileRef.current.value = "";
   };
 
@@ -3361,10 +3436,15 @@ function JoinImportPanel({ data, updateData, showToast }) {
           <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "8px 16px" }} onClick={onParseText} disabled={!csvText.trim()}>読み込む</button>
           <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }}
             disabled={!csvText && !rawRows}
-            onClick={() => { setCsvText(""); setRawRows(null); setHeaders([]); setMapping(null); if (fileRef.current) fileRef.current.value = ""; }}>
+            onClick={() => { setCsvText(""); setRawRows(null); setHeaders([]); setMapping(null); setImportSourceName("貼り付けCSV"); setCounselingSyncWarning(""); if (fileRef.current) fileRef.current.value = ""; }}>
             <X size={13} /> リセット
           </button>
         </div>
+        {counselingSyncWarning && (
+          <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginTop: 10 }}>
+            <AlertTriangle size={14} /> {counselingSyncWarning}
+          </div>
+        )}
 
         {rawRows && (
           <div className="f4h-fade-in" style={{ marginTop: 18, borderTop: "1px solid var(--border-soft)", paddingTop: 16 }}>
@@ -3385,6 +3465,7 @@ function JoinImportPanel({ data, updateData, showToast }) {
                   <span>検出 <b className="num">{cleaned.length}</b>件</span>
                   <span>新規取込 <b className="num" style={{ color: "var(--go)" }}>{dedup.accepted.length}</b>件</span>
                   <span>重複/日付不明スキップ <b className="num" style={{ color: "var(--ink-faint)" }}>{dedup.skipped}</b>件</span>
+                  <span>カウンセリング分析用 <b className="num" style={{ color: "var(--blue)" }}>{counselingImportableCount}</b>件</span>
                 </div>
                 <div className="scrollbar-thin" style={{ maxHeight: 220, overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8, marginBottom: 12 }}>
                   <table className="f4h-table">
@@ -3399,8 +3480,8 @@ function JoinImportPanel({ data, updateData, showToast }) {
                     </tbody>
                   </table>
                 </div>
-                <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "9px 18px" }} onClick={handleImport} disabled={!dedup.accepted.length}>
-                  <Check size={15} /> {dedup.accepted.length}件を取り込む
+                <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "9px 18px" }} onClick={handleImport} disabled={!dedup.accepted.length && !counselingImportableCount}>
+                  <Check size={15} /> 取り込む
                 </button>
               </>
             )}
@@ -3411,6 +3492,10 @@ function JoinImportPanel({ data, updateData, showToast }) {
       <div className="f4h-card" style={{ padding: 18 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 12 }}>
           <div style={{ fontWeight: 700, fontSize: 14 }}>入会者データ一覧（{data.joins.length}件）</div>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", fontSize: 12.5, color: "var(--ink-soft)" }}>
+            <CounselingStatLine label="CVR用入会者データ" value={`${data.joins.length}件`} />
+            <CounselingStatLine label="カウンセリング分析用新規入会者データ" value={`${normalizeCounselingNewMembers(data.counselingNewMembers).length}件`} />
+          </div>
           <input className="f4h-input" style={{ width: 150 }} placeholder="メンバーIDで検索" value={search} onChange={(e) => setSearch(e.target.value)} />
         </div>
         {filteredJoins.length === 0 ? <EmptyState icon={UserPlus} title="入会データがありません" /> : (
@@ -4514,11 +4599,12 @@ function NewMemberImportPanel({ data, updateData, showToast }) {
   return (
     <div className="f4h-card" style={{ padding: 18 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-        <Upload size={16} /><div style={{ fontWeight: 700, fontSize: 14 }}>hacomono「メンバー一覧（新規入会）」CSVを取り込む</div>
+        <Info size={16} /><div style={{ fontWeight: 700, fontSize: 14 }}>新規入会者CSVの取込口について</div>
       </div>
       <p style={{ fontSize: 12.5, color: "var(--ink-faint)", margin: "2px 0 14px", lineHeight: 1.7 }}>
-        新規入会CSVは全置換保存します。店舗判定は「所属店舗名」、利用開始日は「プラン契約適用開始日」を優先し、空欄の場合のみ「入会日時」を使います。
+        新規入会者CSVは「入会者データ」タブから取り込むと、CVR分析とカウンセリング分析の両方に反映されます。
       </p>
+      <div style={{ display: "none" }} aria-hidden="true">
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
         <button type="button" className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} onClick={() => newMembersFileInputRef.current?.click()}>
           <Upload size={14} /> CSVファイルを選択
@@ -4615,6 +4701,7 @@ function NewMemberImportPanel({ data, updateData, showToast }) {
           )}
         </div>
       )}
+      </div>
       <div style={{ marginTop: 14, fontSize: 12.5, color: "var(--ink-soft)" }}>
         <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
           <CounselingStatLine label="保存済み新規入会者データ 合計" value={`${newMembers.length}件`} />
