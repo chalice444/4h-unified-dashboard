@@ -3064,7 +3064,7 @@ function TrialImportPanel({ data, updateData, showToast }) {
     await updateData("trials", (cur) => cur.map((t) => (t.id === id ? { ...t, staff } : t)));
   };
   const setJoinMonthFor = async (id, value) => {
-    const manualJoinMonth = value === "" ? null : Number(value);
+    const manualJoinMonth = value === "" ? null : value === NOSHOW_MARKER ? NOSHOW_MARKER : Number(value);
     await updateData("trials", (cur) => cur.map((t) => (t.id === id ? { ...t, manualJoinMonth } : t)));
   };
   const deleteTrial = async (id) => {
@@ -4459,126 +4459,10 @@ function ActiveMemberImportPanel({ data, updateData, showToast }) {
 }
 
 function NewMemberImportPanel({ data, updateData, showToast }) {
-  const [newMembersCsvText, setNewMembersCsvText] = useState("");
-  const [newMembersImportStats, setNewMembersImportStats] = useState(null);
-  const [newMembersImportError, setNewMembersImportError] = useState("");
-  const [newMembersFileName, setNewMembersFileName] = useState("");
-  const [newMembersSelectedFile, setNewMembersSelectedFile] = useState(null);
-  const newMembersFileInputRef = useRef(null);
   const newMembers = normalizeCounselingNewMembers(data.counselingNewMembers);
   const newMembersMeta = normalizeCounselingNewMembersMeta(data.counselingNewMembers);
   const newMemberMonthCounts = monthlyCounselingMemberCounts(newMembers, counselingNewMemberMonthOf);
 
-  const reset = () => {
-    setNewMembersCsvText("");
-    setNewMembersImportStats(null);
-    setNewMembersImportError("");
-    setNewMembersFileName("");
-    setNewMembersSelectedFile(null);
-    if (newMembersFileInputRef.current) newMembersFileInputRef.current.value = "";
-  };
-
-  const doParse = useCallback((text, name = "") => {
-    const rawText = String(text ?? "");
-    const clean = rawText.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-    if (!clean.trim()) {
-      const message = "CSV本文を読み取れませんでした。ファイル選択または貼り付け内容を確認してください。";
-      setNewMembersImportStats({
-        rows: [],
-        stats: activeMemberPreviewStats(clean, { data: [], meta: { fields: [] } }, {
-          rowCount: 0, validCount: 0, excludedCount: 0, blankMemberIdCount: 0, duplicateMemberIdCount: 0, unknownStartDateCount: 0,
-        }),
-        filename: name || "貼り付けCSV",
-        message,
-      });
-      setNewMembersImportError(message);
-      return;
-    }
-    setNewMembersImportError("");
-    Papa.parse(clean, {
-      header: true,
-      skipEmptyLines: true,
-      transformHeader: (header) => String(header ?? "").replace(/^\uFEFF/, "").trim().replace(/^[　\s]+|[　\s]+$/g, ""),
-      complete: (res) => {
-        const rawRows = res.data || [];
-        const parsed = parseCounselingNewMembers(rawRows);
-        const message = rawRows.length === 0 ? "CSV本文を読み取れませんでした。ファイル選択または貼り付け内容を確認してください。" : "";
-        setNewMembersImportStats({
-          rows: parsed.rows,
-          stats: activeMemberPreviewStats(clean, res, parsed.stats),
-          filename: name || "貼り付けCSV",
-          message,
-        });
-        setNewMembersImportError(message);
-      },
-      error: () => {
-        setNewMembersImportError("CSVの解析に失敗しました。");
-        showToast("CSVの解析に失敗しました。", true);
-      },
-    });
-  }, [showToast]);
-
-  const handleNewMembersFileChange = useCallback(async (e) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    console.info("[counseling new import] file selected", f.name, f.size);
-    setNewMembersFileName(f.name);
-    setNewMembersSelectedFile(f);
-    setNewMembersCsvText("");
-    setNewMembersImportStats(null);
-    setNewMembersImportError("");
-    try {
-      const text = await f.text();
-      setNewMembersCsvText(text);
-    } catch (error) {
-      console.warn("[counseling] new member file.text failed", error);
-      setNewMembersImportError("ファイルの読み込みに失敗しました。");
-      showToast("ファイルの読み込みに失敗しました。", true);
-    }
-  }, [showToast]);
-
-  const importNewMembersCsv = useCallback(async () => {
-    if (newMembersCsvText.trim()) {
-      doParse(newMembersCsvText, newMembersFileName);
-      return;
-    }
-    if (newMembersSelectedFile) {
-      try {
-        const text = await newMembersSelectedFile.text();
-        setNewMembersCsvText(text);
-        doParse(text, newMembersSelectedFile.name || newMembersFileName);
-        return;
-      } catch (error) {
-        console.warn("[counseling] new member selectedFile.text failed", error);
-        setNewMembersImportError("ファイルの読み込みに失敗しました。");
-        showToast("ファイルの読み込みに失敗しました。", true);
-        return;
-      }
-    }
-    doParse("", newMembersFileName);
-  }, [newMembersCsvText, newMembersFileName, newMembersSelectedFile, doParse, showToast]);
-
-  const handleImport = async () => {
-    if (!newMembersImportStats) {
-      showToast("CSVを読み込んでください。", true);
-      return;
-    }
-    if (!newMembersImportStats.rows.length) {
-      showToast("保存対象の新規入会者データがありません。", true);
-      return;
-    }
-    await updateData("counselingNewMembers", (cur) => (
-      mergeCounselingMemberMonthImport(
-        cur,
-        newMembersImportStats.rows,
-        newMembersImportStats.stats,
-        newMembersImportStats.filename,
-        counselingNewMemberMonthOf
-      )
-    ));
-    showToast(`新規入会者 ${newMembersImportStats.rows.length}件を保存しました`);
-    reset();
-  };
   const handleDeleteMonth = async (ym, count) => {
     if (!window.confirm(`${cancellationMonthLabel(ym)}の新規入会者データ${count}件を削除します。よろしいですか？`)) return;
     await updateData("counselingNewMembers", (cur) => deleteCounselingMemberMonth(
@@ -4604,104 +4488,6 @@ function NewMemberImportPanel({ data, updateData, showToast }) {
       <p style={{ fontSize: 12.5, color: "var(--ink-faint)", margin: "2px 0 14px", lineHeight: 1.7 }}>
         新規入会者CSVは「入会者データ」タブから取り込むと、CVR分析とカウンセリング分析の両方に反映されます。
       </p>
-      <div style={{ display: "none" }} aria-hidden="true">
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
-        <button type="button" className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} onClick={() => newMembersFileInputRef.current?.click()}>
-          <Upload size={14} /> CSVファイルを選択
-        </button>
-        <input
-          id="newMembersCsvInput"
-          name="newMembersCsvInput"
-          ref={newMembersFileInputRef}
-          type="file"
-          accept=".csv,text/csv"
-          data-import-handler="newMembers"
-          style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }}
-          onClick={(e) => { e.currentTarget.value = ""; }}
-          onChange={handleNewMembersFileChange}
-        />
-        <span style={{ fontSize: 12, color: "var(--ink-faint)", alignSelf: "center" }}>または下に貼り付け</span>
-      </div>
-      <textarea className="f4h-input" rows={4} placeholder="メンバー一覧（新規入会）CSVの内容をここに貼り付け..."
-        style={{ resize: "vertical", fontFamily: "monospace", fontSize: 12 }}
-        value={newMembersCsvText} onChange={(e) => {
-          setNewMembersCsvText(e.target.value);
-          setNewMembersSelectedFile(null);
-          setNewMembersFileName("貼り付け入力");
-          setNewMembersImportStats(null);
-          setNewMembersImportError("");
-        }} />
-      <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "8px 16px" }} onClick={importNewMembersCsv}>
-          読み込む
-        </button>
-        <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} disabled={!newMembersCsvText && !newMembersSelectedFile && !newMembersImportStats && !newMembersImportError} onClick={reset}>
-          <X size={13} /> リセット
-        </button>
-      </div>
-      <div style={{ marginTop: 10, display: "flex", gap: 14, fontSize: 12.5, color: "var(--ink-soft)", flexWrap: "wrap" }}>
-        <CounselingStatLine label="選択中ファイル名" value={newMembersFileName || "—"} />
-        <CounselingStatLine label="CSV本文文字数" value={`${newMembersCsvText.length}文字`} />
-        <CounselingStatLine label="selectedFile" value={newMembersSelectedFile ? "あり" : "なし"} />
-        <CounselingStatLine label="handler" value="newMembers" />
-      </div>
-      {newMembersImportError && !newMembersImportStats && (
-        <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginTop: 10 }}>
-          <AlertTriangle size={14} /> {newMembersImportError}
-        </div>
-      )}
-      {newMembersImportStats && (
-        <div className="f4h-fade-in" style={{ marginTop: 18, borderTop: "1px solid var(--border-soft)", paddingTop: 16 }}>
-          <div style={{ display: "flex", gap: 14, fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 8, flexWrap: "wrap" }}>
-            <CounselingStatLine label="CSV本文文字数" value={`${newMembersImportStats.stats.csvCharCount || 0}文字`} />
-            <CounselingStatLine label="parse後総行数" value={`${newMembersImportStats.stats.parsedRowCount || 0}件`} />
-            <CounselingStatLine label="今回取込の総行数" value={`${newMembersImportStats.stats.rowCount}件`} />
-            <CounselingStatLine label="有効件数" value={`${newMembersImportStats.stats.validCount}件`} />
-            <CounselingStatLine label="メンバーID空欄除外" value={`${newMembersImportStats.stats.blankMemberIdCount}件`} />
-            <CounselingStatLine label="メンバーID重複" value={`${newMembersImportStats.stats.duplicateMemberIdCount}件`} />
-            <CounselingStatLine label="利用開始日不明" value={`${newMembersImportStats.stats.unknownStartDateCount || 0}件`} />
-            <span>ファイル <b>{newMembersImportStats.filename}</b></span>
-          </div>
-          <div style={{ fontSize: 12, color: "var(--ink-faint)", marginBottom: 10, lineHeight: 1.6 }}>
-            検出したヘッダー列名: {newMembersImportStats.stats.headerFields?.length ? newMembersImportStats.stats.headerFields.join(" / ") : "—"}
-          </div>
-          {newMembersImportStats.message && (
-            <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginBottom: 10 }}>
-              <AlertTriangle size={14} /> {newMembersImportStats.message}
-            </div>
-          )}
-          {newMembersImportStats.rows.length === 0 ? (
-            <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginBottom: 10 }}>
-              <AlertTriangle size={14} /> 保存対象の新規入会者データが見つかりません。
-            </div>
-          ) : (
-            <>
-              <div className="scrollbar-thin" style={{ maxHeight: 220, overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8, marginBottom: 12 }}>
-                <table className="f4h-table">
-                  <thead><tr><th>メンバーID</th><th>氏名</th><th>店舗</th><th>利用開始日</th><th>利用開始月</th><th>入会日時</th><th>契約プラン</th></tr></thead>
-                  <tbody>
-                    {newMembersImportStats.rows.slice(0, 50).map((r) => (
-                      <tr key={r.memberId}>
-                        <td>{r.memberId}</td>
-                        <td style={{ textAlign: "left" }}>{r.name || "—"}</td>
-                        <td style={{ textAlign: "left" }}>{r.store || "—"}</td>
-                        <td>{r.startDate || "—"}</td>
-                        <td>{r.startMonth || "—"}</td>
-                        <td>{r.joinDate || "—"}</td>
-                        <td style={{ textAlign: "left" }}>{r.planName || "—"}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "9px 18px" }} onClick={handleImport}>
-                <Check size={15} /> 新規入会者 {newMembersImportStats.rows.length}件を保存する
-              </button>
-            </>
-          )}
-        </div>
-      )}
-      </div>
       <div style={{ marginTop: 14, fontSize: 12.5, color: "var(--ink-soft)" }}>
         <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
           <CounselingStatLine label="保存済み新規入会者データ 合計" value={`${newMembers.length}件`} />
@@ -5637,8 +5423,8 @@ function CounselingAnalysisView({ data, updateData, showToast, onNavigate }) {
       </CounselingCollapsibleSection>
 
       <CounselingCollapsibleSection
-        title="新規入会者CSV取込"
-        sub="メンバー一覧（新規入会）CSVを保存します"
+        title="新規入会者データの保存状況・削除"
+        sub="新規入会者CSVは入会者データタブから取り込みます"
         open={openImports.newMembers}
         onToggle={() => toggleImportSection("newMembers")}
       >
