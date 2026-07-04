@@ -3699,17 +3699,226 @@ function DataEntryView({ data, updateData, showToast }) {
         { key: "join", label: "入会者データ" },
         { key: "cancellation", label: "退会者CSV" },
         { key: "monthly", label: "月次実績・売上" },
+        { key: "counseling", label: "カウンセリング分析用データ" },
       ]} active={tab} onChange={setTab} />
       {tab === "trial" && <TrialImportPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "join" && <JoinImportPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "cancellation" && <CancellationImportPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "monthly" && <MonthlyActualsPanel data={data} updateData={updateData} showToast={showToast} />}
+      {tab === "counseling" && <CounselingDataImportSection data={data} updateData={updateData} showToast={showToast} />}
     </div>
   );
 }
 
 function CounselingStatLine({ label, value }) {
   return <span>{label} <b className="num">{value}</b></span>;
+}
+
+function CounselingReservationImportPanel({ data, updateData, showToast }) {
+  const [csvText, setCsvText] = useState("");
+  const [preview, setPreview] = useState(null);
+  const [fileName, setFileName] = useState("");
+  const fileRef = useRef(null);
+  const reservations = normalizeCounselingReservations(data.counselingReservations);
+  const meta = normalizeCounselingMeta(data.counselingMeta);
+  const monthCounts = monthlyCounselingCounts(reservations);
+
+  const reset = () => {
+    setCsvText("");
+    setPreview(null);
+    setFileName("");
+    if (fileRef.current) fileRef.current.value = "";
+  };
+
+  const doParse = useCallback((text, name = "") => {
+    const clean = text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    Papa.parse(clean, {
+      header: true,
+      skipEmptyLines: true,
+      complete: (res) => {
+        const rawRows = res.data || [];
+        const parsed = parseCounselingRows(rawRows);
+        const missingRequiredHeaders = missingCounselingReservationHeaders(res.meta?.fields || []);
+        setPreview({
+          rows: parsed.rows,
+          stats: { ...parsed.stats, missingRequiredHeaders },
+          filename: name || "貼り付けCSV",
+        });
+      },
+      error: () => showToast("CSVの解析に失敗しました。", true),
+    });
+  }, [showToast]);
+
+  const onFile = useCallback((e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setFileName(f.name);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = ev.target.result;
+      setCsvText(text);
+      doParse(text, f.name);
+    };
+    reader.onerror = () => showToast("ファイルの読み込みに失敗しました。", true);
+    reader.readAsText(f, "UTF-8");
+  }, [doParse, showToast]);
+
+  const onParseText = useCallback(() => {
+    if (csvText.trim()) doParse(csvText, fileName);
+  }, [csvText, doParse, fileName]);
+
+  const handleImport = async () => {
+    if (!preview) {
+      showToast("CSVを読み込んでください。", true);
+      return;
+    }
+    if (!preview.rows.length) {
+      showToast("保存対象のカウンセリング予約がありません。", true);
+      return;
+    }
+    const importedAt = new Date().toISOString();
+    const source = {
+      importedAt,
+      filename: preview.filename,
+      ...preview.stats,
+    };
+    await updateData("counselingReservations", (cur) => mergeCounselingReservations(cur, preview.rows));
+    await updateData("counselingMeta", () => source);
+    showToast(`カウンセリング予約 ${preview.rows.length}件を保存しました`);
+    reset();
+  };
+
+  return (
+    <div className="f4h-card" style={{ padding: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+        <Upload size={16} /><div style={{ fontWeight: 700, fontSize: 14 }}>hacomono「予約一覧」CSVを取り込む</div>
+      </div>
+      <p style={{ fontSize: 12.5, color: "var(--ink-faint)", margin: "2px 0 14px", lineHeight: 1.7 }}>
+        固定枠：予約一覧CSV、自由枠：予約一覧CSVのどちらにも対応しています。ファイル名ではなくCSVヘッダー名で必要項目を取得します。
+      </p>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+        <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} onClick={() => fileRef.current?.click()}>
+          <Upload size={14} /> CSVファイルを選択
+        </button>
+        <input ref={fileRef} type="file" accept=".csv,text/csv" style={{ display: "none" }} onChange={onFile} />
+        <span style={{ fontSize: 12, color: "var(--ink-faint)", alignSelf: "center" }}>または下に貼り付け</span>
+      </div>
+      <textarea className="f4h-input" rows={4} placeholder="CSVの内容をここに貼り付け..."
+        style={{ resize: "vertical", fontFamily: "monospace", fontSize: 12 }}
+        value={csvText} onChange={(e) => setCsvText(e.target.value)} />
+      <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "8px 16px" }} onClick={onParseText} disabled={!csvText.trim()}>
+          読み込む
+        </button>
+        <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} disabled={!csvText && !preview} onClick={reset}>
+          <X size={13} /> リセット
+        </button>
+      </div>
+
+      {preview && (
+        <div className="f4h-fade-in" style={{ marginTop: 18, borderTop: "1px solid var(--border-soft)", paddingTop: 16 }}>
+          <div style={{ display: "flex", gap: 14, fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 8, flexWrap: "wrap" }}>
+            <CounselingStatLine label="今回取込の総行数" value={`${preview.stats.rowCount}件`} />
+            <CounselingStatLine label="有効件数" value={`${preview.stats.validCount}件`} />
+            <CounselingStatLine label="対象外件数" value={`${preview.stats.excludedCount}件`} />
+            <CounselingStatLine label="メンバーID空欄除外" value={`${preview.stats.blankMemberIdCount}件`} />
+            <CounselingStatLine label="対象外チケット除外" value={`${preview.stats.ticketExcludedCount}件`} />
+            <CounselingStatLine label="受講日不明除外" value={`${preview.stats.unknownDateCount}件`} />
+            <span>ファイル <b>{preview.filename}</b></span>
+          </div>
+          {preview.stats.missingRequiredHeaders?.length > 0 && (
+            <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginBottom: 10 }}>
+              <AlertTriangle size={14} /> 必須列が見つかりません: {preview.stats.missingRequiredHeaders.join(" / ")}
+            </div>
+          )}
+          {preview.rows.length === 0 ? (
+            <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginBottom: 10 }}>
+              <AlertTriangle size={14} /> 保存対象のカウンセリング予約が見つかりません。
+            </div>
+          ) : (
+            <>
+              <div className="scrollbar-thin" style={{ maxHeight: 220, overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8, marginBottom: 12 }}>
+                <table className="f4h-table">
+                  <thead><tr><th>受講日</th><th>店舗</th><th>使用チケット</th><th>メンバーID</th><th>氏名</th><th>開始</th><th>スタッフ</th></tr></thead>
+                  <tbody>
+                    {preview.rows.slice(0, 50).map((r) => (
+                      <tr key={counselingReservationKey(r)}>
+                        <td>{r.lessonDate || "—"}</td>
+                        <td style={{ textAlign: "left" }}>{r.store || "—"}</td>
+                        <td style={{ textAlign: "left" }}>{r.ticket || "—"}</td>
+                        <td>{r.memberId}</td>
+                        <td style={{ textAlign: "left" }}>{r.name || "—"}</td>
+                        <td>{r.startTime || "—"}</td>
+                        <td style={{ textAlign: "left" }}>{r.staffName || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "9px 18px" }} onClick={handleImport}>
+                <Check size={15} /> カウンセリング予約 {preview.rows.length}件を保存する
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      <div style={{ marginTop: 14, fontSize: 12.5, color: "var(--ink-soft)" }}>
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+          <CounselingStatLine label="保存済み予約データ 合計" value={`${reservations.length}件`} />
+          <CounselingStatLine label="最終取込日時" value={meta.importedAt ? new Date(meta.importedAt).toLocaleString("ja-JP") : "—"} />
+          <CounselingStatLine label="直近取込ファイル名" value={meta.filename || "—"} />
+        </div>
+        {monthCounts.length > 0 && (
+          <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {monthCounts.map(({ ym, count }) => (
+              <span key={ym} style={{ padding: "4px 8px", border: "1px solid var(--border-soft)", borderRadius: 999, background: "var(--surface-soft)" }}>
+                {cancellationMonthLabel(ym)} {count}件
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CounselingDataImportSection({ data, updateData, showToast }) {
+  const reservations = normalizeCounselingReservations(data.counselingReservations);
+  const reservationMeta = normalizeCounselingMeta(data.counselingMeta);
+  const activeMembers = normalizeCounselingActiveMembers(data.counselingActiveMembers);
+  const activeMembersMeta = normalizeCounselingActiveMembersMeta(data.counselingActiveMembers);
+  const newMembers = normalizeCounselingNewMembers(data.counselingNewMembers);
+  const newMembersMeta = normalizeCounselingNewMembersMeta(data.counselingNewMembers);
+  const cancelMembers = normalizeCounselingCancelMembers(data.counselingCancelMembers);
+  const cancelMembersMeta = normalizeCounselingCancelMembersMeta(data.counselingCancelMembers);
+  const metaTime = (value) => value ? new Date(value).toLocaleString("ja-JP") : "—";
+  return (
+    <div className="f4h-fade-in" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <SectionHeading eyebrow="カウンセリング分析用データ" title="カウンセリング分析用データ" />
+      <p style={{ fontSize: 12.5, color: "var(--ink-faint)", margin: "-8px 0 0", lineHeight: 1.7 }}>
+        カウンセリング分析で使用するCSVを取り込みます。取込後はカウンセリング分析タブに反映されます。
+      </p>
+      <div className="f4h-card" style={{ padding: 18 }}>
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 12.5, color: "var(--ink-soft)" }}>
+          <CounselingStatLine label="予約データ" value={`${reservations.length}件`} />
+          <CounselingStatLine label="在籍者データ" value={`${activeMembers.length}件`} />
+          <CounselingStatLine label="新規入会者データ" value={`${newMembers.length}件`} />
+          <CounselingStatLine label="退会者データ" value={`${cancelMembers.length}件`} />
+        </div>
+        <div style={{ marginTop: 8, display: "flex", gap: 14, flexWrap: "wrap", fontSize: 12, color: "var(--ink-faint)" }}>
+          <span>予約 最終取込: {metaTime(reservationMeta.importedAt)}</span>
+          <span>在籍者 最終取込: {metaTime(activeMembersMeta.importedAt)}</span>
+          <span>新規入会者 最終取込: {metaTime(newMembersMeta.importedAt || newMembersMeta.lastImportedAt)}</span>
+          <span>退会者 最終取込: {metaTime(cancelMembersMeta.importedAt || cancelMembersMeta.lastImportedAt)}</span>
+        </div>
+      </div>
+      <CounselingReservationImportPanel data={data} updateData={updateData} showToast={showToast} />
+      <ActiveMemberImportPanel data={data} updateData={updateData} showToast={showToast} />
+      <NewMemberImportPanel data={data} updateData={updateData} showToast={showToast} />
+      <CancelMemberImportPanel data={data} updateData={updateData} showToast={showToast} />
+    </div>
+  );
 }
 
 function ActiveMemberImportPanel({ data, updateData, showToast }) {
