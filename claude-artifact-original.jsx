@@ -373,13 +373,11 @@ function mergeRowsByStableKey(currentRows, importedRows, keyFn, mergeRow = (_exi
   return { rows: [...map.values()], addedCount, updatedCount };
 }
 function trialImportKey(row) {
-  const reservationId = String(row?.reservationId || "").trim();
-  if (reservationId) return `reservation:${reservationId}`;
   const lessonDate = String(row?.lessonDate || "").trim();
   const store = normalizedTrialStore(row);
   const personKey = normalizedTrialPersonKey(row);
   if (!lessonDate || !store || !personKey) return "";
-  return `event:${stableImportKey([lessonDate, store, personKey, row?.startTime, row?.programName || row?.ticket])}`;
+  return `event:${stableImportKey([personKey, lessonDate, store])}`;
 }
 function joinImportKey(row) {
   return stableImportKey([row?.memberId, row?.year, row?.month]);
