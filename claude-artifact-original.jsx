@@ -455,6 +455,22 @@ function tenureBandOf(months) {
   if (months <= 12) return "7〜12ヶ月";
   return "13ヶ月以上";
 }
+function cancellationTenureStartDate(row) {
+  return row?.joinDate || row?.planContractDate || null;
+}
+function cancellationTenureDays(row) {
+  if (!row?.planEndDate) return null;
+  const startDate = cancellationTenureStartDate(row);
+  return startDate ? daysBetween(startDate, row.planEndDate) : null;
+}
+function cancellationTenureMonths(row) {
+  if (!row?.planEndDate) return null;
+  const startDate = cancellationTenureStartDate(row);
+  return startDate ? monthsBetween(startDate, row.planEndDate) : null;
+}
+function cancellationTenureBand(row) {
+  return tenureBandOf(cancellationTenureMonths(row));
+}
 function inactiveBandOf(days) {
   if (days == null || isNaN(days)) return null;
   if (days <= 7) return "0〜7日";
@@ -484,8 +500,10 @@ function parseCancellationRows(rawRows) {
     const planContractDate = parseFlexibleDate(rowValue(row, ["プラン契約日"]));
     const cancellationRequestDate = parseFlexibleDate(rowValue(row, ["退会手続き日"]));
     const lastLessonDate = parseFlexibleDate(rowValue(row, ["最終受講日時"]));
-    const tenureDays = daysBetween(planContractDate, planEndDate);
-    const tenureMonths = monthsBetween(planContractDate, planEndDate);
+    const joinDate = parseFlexibleDate(rowValue(row, ["入会日時"]));
+    const tenureSource = { joinDate, planContractDate, planEndDate };
+    const tenureDays = cancellationTenureDays(tenureSource);
+    const tenureMonths = cancellationTenureMonths(tenureSource);
     const inactiveBeforeCancelDays = cancellationRequestDate ? daysBetween(lastLessonDate, cancellationRequestDate) : null;
     const age = Number(rowValue(row, ["年齢"])) || null;
 
@@ -1458,9 +1476,8 @@ function cancellationTenureAnalysis(rows, year, month) {
 
   for (const row of rows) {
     if (cancellationMonthOf(row) !== ym) continue;
-    if (!row?.planContractDate || !row?.planEndDate) continue;
-    const tenureMonths = monthsBetween(row.planContractDate, row.planEndDate);
-    const band = tenureBandOf(tenureMonths);
+    const tenureMonths = cancellationTenureMonths(row);
+    const band = cancellationTenureBand(row);
     if (!band) continue;
     const rec = bands.find((b) => b.label === band);
     if (!rec) continue;
@@ -1510,12 +1527,8 @@ function cancellationAgeTenureAnalysis(rows, year, month) {
 
   for (const row of rows) {
     if (cancellationMonthOf(row) !== ym) continue;
-    if (!row?.planContractDate || !row?.planEndDate) {
-      excludedCount += 1;
-      continue;
-    }
-    const tenureMonths = monthsBetween(row.planContractDate, row.planEndDate);
-    const band = tenureBandOf(tenureMonths);
+    const tenureMonths = cancellationTenureMonths(row);
+    const band = cancellationTenureBand(row);
     if (!band) {
       excludedCount += 1;
       continue;
@@ -3447,13 +3460,13 @@ function CancellationAnalysisView({ data }) {
           </tbody>
         </table>
         <div style={noteStyle}>
-          在籍期間は「プラン契約日」から「プラン契約適用終了日」までで計算しています。プラン契約日またはプラン契約適用終了日がないデータは、この分析から除外しています。
+          在籍期間は原則「入会日時」から「プラン契約適用終了日」までで計算しています。入会日時がない場合のみ「プラン契約日」で補完します。プラン契約適用開始日は、休会・プラン変更の影響を受けるため在籍期間の起点には使用していません。終了日がないデータは、この分析から除外しています。
         </div>
         <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--border-soft)" }}>
           <div style={{ ...sectionTitleStyle, marginBottom: 8 }}>年齢別 在籍期間分析</div>
           <div style={{ fontSize: 11.5, color: "var(--ink-faint)", lineHeight: 1.6, marginBottom: 10 }}>
-            年齢別の平均・中央値在籍月数は、既存の在籍期間分析と同じく「プラン契約日」から「プラン契約適用終了日」までで計算しています。
-            {ageTenureAnalysis.excludedCount > 0 && ` プラン契約日またはプラン契約適用終了日がないため除外したデータは${num(ageTenureAnalysis.excludedCount)}件です。`}
+            年齢別の平均・中央値在籍月数も、原則「入会日時」から「プラン契約適用終了日」までで計算しています。入会日時がない場合のみ「プラン契約日」で補完します。
+            {ageTenureAnalysis.excludedCount > 0 && ` 在籍期間の開始日または終了日がないため除外したデータは${num(ageTenureAnalysis.excludedCount)}件です。`}
           </div>
           <table className="f4h-table" style={{ fontSize: 12.5 }}>
             <thead>
