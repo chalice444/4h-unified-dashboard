@@ -53,7 +53,7 @@ function monthLabel(m) { return `${m}月`; }
 function ymEqual(y1, m1, y2, m2) { return y1 === y2 && m1 === m2; }
 
 function filterTrials(trials, { store, staff, year, month, dayFrom, dayTo, asOf, excludeOptOut = true } = {}) {
-  return trials.filter((t) => {
+  return dedupeTrialRows(trials).filter((t) => {
     if (store && t.store !== store) return false;
     if (staff && t.staff !== staff) return false;
     if (!staff && excludeOptOut && t.staff === EXCLUDED_STAFF) return false;
@@ -126,7 +126,7 @@ function countOptOutTrials(trials, { store, months }) {
 }
 // 期間内で「来店無し」として除外された件数
 function countNoshowTrials(trials, { store, months }) {
-  return trials.filter((t) => t.manualJoinMonth === NOSHOW_MARKER && (store ? t.store === store : true))
+  return dedupeTrialRows(trials).filter((t) => t.manualJoinMonth === NOSHOW_MARKER && (store ? t.store === store : true))
     .filter((t) => months.some((m) => inMonth(t.lessonDate, m.year, m.month))).length;
 }
 
@@ -342,6 +342,15 @@ function isFreeTrialTicket(ticketRaw) {
 function stableImportKey(parts) {
   return parts.map((part) => String(part ?? "").trim()).join("__");
 }
+function nonEmptyValue(value) {
+  return value !== undefined && value !== null && value !== "";
+}
+function normalizedTrialStore(row) {
+  return matchStoreName(row?.store || "") || String(row?.store || "").trim();
+}
+function normalizedTrialPersonKey(row) {
+  return normalizeMemberId(row?.memberId) || String(row?.name || "").trim();
+}
 function mergeRowsByStableKey(currentRows, importedRows, keyFn, mergeRow = (_existing, incoming) => incoming) {
   const map = new Map();
   const fallbackKey = (row, index, side) => `${side}:${index}:${JSON.stringify(row)}`;
@@ -364,8 +373,13 @@ function mergeRowsByStableKey(currentRows, importedRows, keyFn, mergeRow = (_exi
   return { rows: [...map.values()], addedCount, updatedCount };
 }
 function trialImportKey(row) {
-  if (row?.reservationId) return `reservation:${row.reservationId}`;
-  return stableImportKey([row?.lessonDate, matchStoreName(row?.store || "") || row?.store, row?.memberId || row?.name, row?.startTime, row?.ticket]);
+  const reservationId = String(row?.reservationId || "").trim();
+  if (reservationId) return `reservation:${reservationId}`;
+  const lessonDate = String(row?.lessonDate || "").trim();
+  const store = normalizedTrialStore(row);
+  const personKey = normalizedTrialPersonKey(row);
+  if (!lessonDate || !store || !personKey) return "";
+  return `event:${stableImportKey([lessonDate, store, personKey, row?.startTime, row?.programName || row?.ticket])}`;
 }
 function joinImportKey(row) {
   return stableImportKey([row?.memberId, row?.year, row?.month]);
@@ -449,8 +463,9 @@ function cleanCsvRows(rawRows, mapping) {
     const memberId = memberIdRaw != null && String(memberIdRaw).trim() !== ""
       ? String(memberIdRaw).trim().replace(/[　\s]/g, "") : null;
     out.push({
-      reservationId: String(rowValue(row, ["予約ID", "予約 Id", "予約番号"]) || "").trim(),
+      reservationId: String(rowValue(row, ["予約ID", "予約 Id", "予約番号", "reservationId", "reservation_id"]) || "").trim(),
       store, ticket: String(ticketRaw).trim(), lessonDate,
+      programName: String(rowValue(row, ["プログラム名", "クラス名", "レッスン名", "programName", "program_name"]) || "").trim(),
       applyDate: mapping.applyDate ? parseFlexibleDate(row[mapping.applyDate]) : null,
       startTime: mapping.startTime ? parseFlexibleTime(row[mapping.startTime]) : null,
       memberId,
@@ -462,14 +477,46 @@ function cleanCsvRows(rawRows, mapping) {
   }
   return out;
 }
-// 既存trialsとID重複チェック：先に存在するものを優先、新規取込側の重複はスキップ
+// 体験イベント単位で重複排除。既存手動値を残し、CSV由来の最新情報で更新する。
+const MANUAL_TRIAL_FIELDS = ["staff", "note", "manualJoinMonth"];
+function mergeTrialRowsPreservingManual(existing, incoming) {
+  const merged = { ...(existing || {}) };
+  for (const [key, value] of Object.entries(incoming || {})) {
+    if (nonEmptyValue(value)) merged[key] = value;
+  }
+  if (existing?.id) merged.id = existing.id;
+  for (const key of MANUAL_TRIAL_FIELDS) {
+    if (nonEmptyValue(existing?.[key])) merged[key] = existing[key];
+  }
+  return merged;
+}
+function dedupeTrialRows(rows) {
+  const keyToIndex = new Map();
+  const out = [];
+  for (const row of rows || []) {
+    const key = trialImportKey(row);
+    if (!key) {
+      out.push(row);
+      continue;
+    }
+    const existingIndex = keyToIndex.get(key);
+    if (existingIndex == null) {
+      keyToIndex.set(key, out.length);
+      out.push(row);
+    } else {
+      out[existingIndex] = mergeTrialRowsPreservingManual(out[existingIndex], row);
+    }
+  }
+  return out;
+}
 function dedupeAgainstExisting(candidates, existingTrials) {
-  const existingIds = new Set((existingTrials || []).map(trialImportKey));
+  const existingIds = new Set(dedupeTrialRows(existingTrials || []).map(trialImportKey).filter(Boolean));
   const seenInBatch = new Set();
   const accepted = [];
   let skipped = 0;
   for (const c of candidates) {
     const key = trialImportKey(c);
+    if (!key) { skipped++; continue; }
     if (seenInBatch.has(key)) { skipped++; continue; }
     seenInBatch.add(key);
     accepted.push(c);
@@ -494,23 +541,25 @@ function dedupeJoins(candidates, existingJoins) {
 }
 function mergeTrialImportRows(currentRows, importedRows) {
   const map = new Map();
-  for (const row of currentRows || []) map.set(trialImportKey(row), row);
+  const passthroughRows = [];
+  for (const row of currentRows || []) {
+    const key = trialImportKey(row);
+    if (!key) {
+      passthroughRows.push(row);
+      continue;
+    }
+    map.set(key, map.has(key) ? mergeTrialRowsPreservingManual(map.get(key), row) : row);
+  }
   let nextId = nextTrialId(currentRows || []);
   let addedCount = 0;
   let updatedCount = 0;
   for (const row of importedRows || []) {
     const key = trialImportKey(row);
+    if (!key) continue;
     const existing = map.get(key);
     if (existing) {
       updatedCount += 1;
-      map.set(key, {
-        ...existing,
-        ...row,
-        id: existing.id,
-        staff: existing.staff,
-        note: existing.note,
-        manualJoinMonth: existing.manualJoinMonth,
-      });
+      map.set(key, mergeTrialRowsPreservingManual(existing, row));
     } else {
       const id = nextId;
       nextId = `t${Number(nextId.slice(1)) + 1}`;
@@ -518,7 +567,7 @@ function mergeTrialImportRows(currentRows, importedRows) {
       map.set(key, { id, ...row });
     }
   }
-  return { rows: [...map.values()], addedCount, updatedCount };
+  return { rows: [...passthroughRows, ...map.values()], addedCount, updatedCount };
 }
 function mergeJoinImportRows(currentRows, importedRows) {
   return mergeRowsByStableKey(currentRows || [], importedRows || [], joinImportKey);
@@ -4512,6 +4561,8 @@ function TrialImportPanel({ data, updateData, showToast }) {
   }, [rawRows, mapping]);
 
   const dedup = useMemo(() => dedupeAgainstExisting(cleaned, data.trials), [cleaned, data.trials]);
+  const displayTrials = useMemo(() => dedupeTrialRows(data.trials), [data.trials]);
+  const savedDuplicateCount = Math.max(0, data.trials.length - displayTrials.length);
 
   const handleImport = async () => {
     if (!dedup.accepted.length) { showToast("取り込める新規データがありません。", true); return; }
@@ -4528,7 +4579,7 @@ function TrialImportPanel({ data, updateData, showToast }) {
   const setMap = (key, val) => setMapping((m) => ({ ...m, [key]: val }));
 
   const filteredTrials = useMemo(() => {
-    let rows = [...data.trials].sort((a, b) => (b.lessonDate || "").localeCompare(a.lessonDate || ""));
+    let rows = [...displayTrials].sort((a, b) => (b.lessonDate || "").localeCompare(a.lessonDate || ""));
     if (filterStore) rows = rows.filter((t) => t.store === filterStore);
     if (filterUnassigned) rows = rows.filter((t) => !t.staff);
     if (filterOptOut) rows = rows.filter((t) => t.staff === EXCLUDED_STAFF);
@@ -4538,12 +4589,12 @@ function TrialImportPanel({ data, updateData, showToast }) {
       rows = rows.filter((t) => (t.name || "").toLowerCase().includes(q) || (t.memberId || "").includes(q));
     }
     return rows;
-  }, [data.trials, filterStore, filterUnassigned, filterOptOut, filterNoshow, search]);
+  }, [displayTrials, filterStore, filterUnassigned, filterOptOut, filterNoshow, search]);
 
-  const optOutCount = data.trials.filter((t) => t.staff === EXCLUDED_STAFF).length;
-  const noshowCount = data.trials.filter((t) => t.manualJoinMonth === NOSHOW_MARKER).length;
+  const optOutCount = displayTrials.filter((t) => t.staff === EXCLUDED_STAFF).length;
+  const noshowCount = displayTrials.filter((t) => t.manualJoinMonth === NOSHOW_MARKER).length;
 
-  const unassignedCount = data.trials.filter((t) => !t.staff && t.store).length;
+  const unassignedCount = displayTrials.filter((t) => !t.staff && t.store).length;
   const visibleTrials = filteredTrials.slice(0, visibleCount);
   const visibleTrialIds = useMemo(() => visibleTrials.map((t) => t.id), [visibleTrials]);
   const visibleIdSet = useMemo(() => new Set(visibleTrialIds), [visibleTrialIds]);
@@ -4646,7 +4697,10 @@ function TrialImportPanel({ data, updateData, showToast }) {
                 <div style={{ display: "flex", gap: 14, fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 8, flexWrap: "wrap" }}>
                   <span>無料体験対象 <b className="num">{cleaned.length}</b>件</span>
                   <span>新規取込 <b className="num" style={{ color: "var(--go)" }}>{dedup.accepted.length}</b>件</span>
+                  <span>新規追加 <b className="num" style={{ color: "var(--go)" }}>{dedup.added}</b>件</span>
+                  <span>更新 <b className="num">{dedup.updated}</b>件</span>
                   <span>重複スキップ <b className="num" style={{ color: "var(--ink-faint)" }}>{dedup.skipped}</b>件</span>
+                  <span>分析対象 <b className="num">{displayTrials.length}</b>件</span>
                 </div>
                 <div className="scrollbar-thin" style={{ maxHeight: 220, overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8, marginBottom: 12 }}>
                   <table className="f4h-table">
@@ -4689,7 +4743,14 @@ function TrialImportPanel({ data, updateData, showToast }) {
 
       <div className="f4h-card" style={{ padding: 18 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 12 }}>
-          <div style={{ fontWeight: 700, fontSize: 14 }}>体験者データ一覧（{data.trials.length}件）</div>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 14 }}>体験者データ一覧（分析対象 {displayTrials.length}件 / 保存済み {data.trials.length}件）</div>
+            {savedDuplicateCount > 0 && (
+              <div style={{ fontSize: 11.5, color: "var(--ink-faint)", marginTop: 2 }}>
+                保存済み重複 {savedDuplicateCount}件は一覧・集計から除外しています。次回CSV取込時に同一イベントへ正規化されます。
+              </div>
+            )}
+          </div>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
             <input className="f4h-input" style={{ width: 150 }} placeholder="氏名・IDで検索" value={search} onChange={(e) => setSearch(e.target.value)} />
             <Pill active={filterStore === ""} onClick={() => setFilterStore("")}>全店</Pill>
@@ -7780,7 +7841,7 @@ function StaffPanel({ data, updateData, showToast }) {
     });
   };
 
-  const usageCount = (name) => data.trials.filter((t) => t.staff === name).length;
+  const usageCount = (name) => dedupeTrialRows(data.trials).filter((t) => t.staff === name).length;
 
   return (
     <div className="f4h-card" style={{ padding: 18 }}>
