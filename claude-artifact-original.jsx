@@ -370,6 +370,39 @@ function trialImportKey(row) {
 function joinImportKey(row) {
   return stableImportKey([row?.memberId, row?.year, row?.month]);
 }
+function exactJoinEventDate(value) {
+  return parseCounselingDate(value) || parseFlexibleDate(value);
+}
+function joinDeletionEventKeys(row) {
+  const memberId = normalizeMemberId(row?.memberId);
+  const store = matchStoreName(row?.store || "") || String(row?.store || "").trim();
+  const name = String(row?.name || "").trim();
+  const joinDate = exactJoinEventDate(row?.joinDate);
+  const planContractDate = exactJoinEventDate(row?.planContractDate);
+  const startDate = exactJoinEventDate(row?.startDate || row?.effectiveDate || row?.planStartDate);
+  const keys = [];
+  if (memberId && joinDate) keys.push(`member-join:${stableImportKey([memberId, joinDate])}`);
+  if (memberId && planContractDate) keys.push(`member-contract:${stableImportKey([memberId, planContractDate])}`);
+  if (memberId && startDate) keys.push(`member-start:${stableImportKey([memberId, startDate])}`);
+  if (store && name && joinDate) keys.push(`store-name-join:${stableImportKey([store, name, joinDate])}`);
+  return new Set(keys);
+}
+function deleteCounselingNewMemberEvent(currentValue, targetJoin) {
+  const targetKeys = joinDeletionEventKeys(targetJoin);
+  if (!targetKeys.size) {
+    return { value: currentValue, deletedCount: 0, matched: false };
+  }
+  const rows = normalizeCounselingNewMembers(currentValue);
+  const nextRows = rows.filter((row) => {
+    const rowKeys = joinDeletionEventKeys(row);
+    return ![...rowKeys].some((key) => targetKeys.has(key));
+  });
+  const deletedCount = rows.length - nextRows.length;
+  const nextValue = currentValue && typeof currentValue === "object" && !Array.isArray(currentValue)
+    ? { ...currentValue, rows: nextRows, meta: normalizeCounselingNewMembersMeta(currentValue) }
+    : nextRows;
+  return { value: nextValue, deletedCount, matched: deletedCount > 0 };
+}
 // 生CSV行 + マッピング -> クレンジング済み入会候補（メンバーID＋プラン契約適用開始日の年月）
 function cleanJoinCsvRows(rawRows, mapping) {
   const out = [];
@@ -381,7 +414,15 @@ function cleanJoinCsvRows(rawRows, mapping) {
     const iso = parseFlexibleDate(dateRaw);
     if (!iso) continue;
     const [y, m] = iso.split("-").map(Number);
-    out.push({ memberId, year: y, month: m });
+    out.push({
+      memberId,
+      year: y,
+      month: m,
+      effectiveDate: iso,
+      startDate: iso,
+      joinDate: parseCounselingDate(activeMemberRowValue(row, ["入会日時"])),
+      planContractDate: parseCounselingDate(activeMemberRowValue(row, ["プラン契約日"])),
+    });
   }
   return out;
 }
@@ -4820,10 +4861,18 @@ function JoinImportPanel({ data, updateData, showToast }) {
     if (fileRef.current) fileRef.current.value = "";
   };
 
-  const deleteJoin = async (memberId) => {
-    await updateData("joins", (cur) => cur.filter((j) => j.memberId !== memberId));
+  const deleteJoin = async (targetJoin) => {
+    if (!targetJoin) return;
+    const targetKey = joinImportKey(targetJoin);
+    await updateData("joins", (cur) => (cur || []).filter((j) => joinImportKey(j) !== targetKey));
+    const syncResult = deleteCounselingNewMemberEvent(data.counselingNewMembers, targetJoin);
+    if (syncResult.deletedCount > 0) {
+      await updateData("counselingNewMembers", () => syncResult.value);
+    }
     setDelTarget(null);
-    showToast("削除しました");
+    showToast(syncResult.deletedCount > 0
+      ? `削除しました（CVR用1件 / カウンセリング分析用${syncResult.deletedCount}件）`
+      : "削除しました（カウンセリング分析用は同一入会イベントとして一致しなかったため削除しませんでした）");
   };
 
   const filteredJoins = useMemo(() => {
@@ -4923,9 +4972,9 @@ function JoinImportPanel({ data, updateData, showToast }) {
                 <thead><tr><th>年度</th><th>入会月</th><th>メンバーID</th><th></th></tr></thead>
                 <tbody>
                   {filteredJoins.slice(0, visibleCount).map((j) => (
-                    <tr key={j.memberId}>
+                    <tr key={joinImportKey(j)}>
                       <td>{j.year}</td><td>{j.month ? `${j.month}月` : "—"}</td><td>{j.memberId}</td>
-                      <td><button className="f4h-btn f4h-btn-ghost f4h-focus" style={{ padding: 4 }} onClick={() => setDelTarget(j.memberId)}><Trash2 size={14} /></button></td>
+                      <td><button className="f4h-btn f4h-btn-ghost f4h-focus" style={{ padding: 4 }} onClick={() => setDelTarget(j)}><Trash2 size={14} /></button></td>
                     </tr>
                   ))}
                 </tbody>
@@ -6635,7 +6684,7 @@ function ActiveCounselingProgressSection({ data, periodMode, setPeriodMode, cust
     { key: "second", label: "2回目未実施" },
     { key: "third", label: "3回目未実施" },
     { key: "under3", label: "3回未満" },
-    { key: "under4", label: "4回未満到達" },
+    { key: "under4", label: "4回未到達" },
   ];
   const actionRows = counselingActionListRows(filteredRows, listMode);
   const retiringUnder3Rows = counselingActionListRows(filteredRows, "retiringUnder3");
@@ -6676,11 +6725,11 @@ function ActiveCounselingProgressSection({ data, periodMode, setPeriodMode, cust
         <CounselingKpiCard label="4回目以降到達" value={`${num(count4Plus)}人`} sub="4回目以降" />
         <CounselingKpiCard label="3回目到達率" value={target ? pct1(reached3 / target) : "—"} />
         <CounselingKpiCard label="3回未満人数" value={`${num(under3)}人`} />
-        <CounselingKpiCard label="4回未満人数" value={`${num(under4)}人`} />
+        <CounselingKpiCard label="4回未到達人数" value={`${num(under4)}人`} />
         <CounselingKpiCard label="退会予定者数" value={`${num(retiring)}人`} />
         <CounselingKpiCard label="退会予定かつ初回未実施" value={`${num(retiringFirstMissing)}人`} />
         <CounselingKpiCard label="退会予定かつ3回未満" value={`${num(retiringUnder3)}人`} />
-        <CounselingKpiCard label="退会予定かつ4回未満" value={`${num(retiringUnder4)}人`} />
+        <CounselingKpiCard label="退会予定かつ4回未到達" value={`${num(retiringUnder4)}人`} />
       </div>
 
       <CounselingDefinitionNote />
@@ -6858,7 +6907,7 @@ function NewMemberCounselingProgressSection({ data, periodMode, setPeriodMode, c
         <CounselingKpiCard label="4回目以降到達" value={`${num(count4Plus)}人`} sub="4回目以降" />
         <CounselingKpiCard label="3回目到達率" value={target ? pct1(reached3 / target) : "—"} />
         <CounselingKpiCard label="3回未満人数" value={`${num(under3)}人`} />
-        <CounselingKpiCard label="4回未満人数" value={`${num(under4)}人`} />
+        <CounselingKpiCard label="4回未到達人数" value={`${num(under4)}人`} />
       </div>
 
       <CounselingDefinitionNote />
@@ -6959,7 +7008,7 @@ function CancelMemberCounselingProgressSection({ data, periodMode, setPeriodMode
         <CounselingKpiCard label="4回目以降到達" value={`${num(count4Plus)}人`} sub="4回目以降" />
         <CounselingKpiCard label="3回目到達率" value={target ? pct1(reached3 / target) : "—"} />
         <CounselingKpiCard label="3回未満人数" value={`${num(under3)}人`} />
-        <CounselingKpiCard label="4回未満人数" value={`${num(under4)}人`} />
+        <CounselingKpiCard label="4回未到達人数" value={`${num(under4)}人`} />
       </div>
 
       <CounselingDefinitionNote />
