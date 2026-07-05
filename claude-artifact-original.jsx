@@ -2262,9 +2262,12 @@ function buildAiAssistantPrompt({ mode, data, settings, activeNgIds, externalRep
   const modeRequest = modeKey === "B"
     ? "外部レポートの主張を、下記の安全な集計データと店舗制約に照らして検証してください。妥当な点、根拠不足、修正すべき施策、追加で必要なデータを分けて出してください。"
     : "下記の安全な集計データと店舗制約だけを使い、退会抑止の施策候補を優先順位付きで提案してください。";
-  const outputTemplate = normalized.templates[modeKey] || AI_ASSISTANT_MODE_TEMPLATES[modeKey];
+  const outputTemplate = String(normalized.templates[modeKey] || AI_ASSISTANT_MODE_TEMPLATES[modeKey] || "").trim();
+  const roleInstruction = modeKey === "B"
+    ? "AI assistant report validation mode."
+    : "AI assistant action planning mode.";
   return [
-    outputTemplate,
+    roleInstruction,
     "",
     "## 依頼",
     modeRequest,
@@ -2302,10 +2305,7 @@ function buildAiAssistantPrompt({ mode, data, settings, activeNgIds, externalRep
     ] : []),
     "",
     "## 出力形式",
-    "- 重要な示唆",
-    "- 施策案（対象、工数、担当条件、KPI、期限、リスク）",
-    "- 店舗別に変えるべき点",
-    "- 根拠不足または追加確認が必要な点",
+    outputTemplate || "Not set",
   ].join("\n");
 }
 function collectAiKnownNames(data) {
@@ -2326,6 +2326,7 @@ function detectAiPromptPii(prompt, data) {
   if (/(メンバーID|会員ID|memberId)\s*[:：=]?\s*\d+/i.test(text)) warnings.push("会員IDらしき記載");
   if (/(氏名|名前|memberName)\s*[:：=]/i.test(text)) warnings.push("氏名欄らしき記載");
   if (/(freeText|detailText|自由記述\s*[:：=]|詳細記述\s*[:：=]|原文\s*[:：=])/i.test(text)) warnings.push("自由記述原文らしき記載");
+  if (/[一-龥ぁ-んァ-ヶー]{2,}(さん|様|氏)/.test(text)) warnings.push("person-like honorific text");
   const knownName = collectAiKnownNames(data).find((name) => text.includes(name));
   if (knownName) warnings.push("保存データ内の氏名と一致する文字列");
   return [...new Set(warnings)];
