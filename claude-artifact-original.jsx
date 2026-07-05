@@ -2229,7 +2229,7 @@ const AI_ASSISTANT_MODE_TEMPLATES = {
     "1. 採用してよい主張",
     "2. 保留すべき主張",
     "3. 却下すべき主張",
-    "4. 数字に合っているが解釈が弱い主張",
+    "4. 数字は合っているが解釈が弱い主張",
     "5. 数値根拠が弱い仮説",
     "6. 現場リソースを無視している施策",
     "7. 追加検証が必要な主張",
@@ -2237,7 +2237,7 @@ const AI_ASSISTANT_MODE_TEMPLATES = {
     "9. 必要工数",
     "10. 想定インパクト",
     "11. 検証KPI",
-    "12. 次に確認すべきAI指示",
+    "12. 次に確認すべきBI指標",
   ].join("\n"),
 };
 function normalizeAiAssistantTemplate(modeKey, value) {
@@ -2369,6 +2369,16 @@ function counselingRowsValue(value, normalizer) {
   if (value && typeof value === "object" && !Array.isArray(value) && Array.isArray(value.rows)) return value.rows;
   return normalizer(value);
 }
+function buildAiCounselingScopeLabel(data) {
+  const reservations = normalizeCounselingReservations(data?.counselingReservations);
+  const activeRows = counselingRowsValue(data?.counselingActiveMembers, normalizeCounselingActiveMembers);
+  const newRows = counselingRowsValue(data?.counselingNewMembers, normalizeCounselingNewMembers);
+  const cancelRows = counselingRowsValue(data?.counselingCancelMembers, normalizeCounselingCancelMembers);
+  if (!reservations.length && !activeRows.length && !newRows.length && !cancelRows.length) {
+    return "保存済みカウンセリングデータなし";
+  }
+  return "保存済みカウンセリングデータ全体（予約データ全体・対象会員データ全体） / 全店（退会分析・カウンセリング画面の期間フィルターとは未連動）";
+}
 function buildAiCounselingSummary(data) {
   const reservations = normalizeCounselingReservations(data?.counselingReservations);
   const activeRows = counselingRowsValue(data?.counselingActiveMembers, normalizeCounselingActiveMembers);
@@ -2434,6 +2444,7 @@ function buildAiAssistantPrompt({ mode, data, settings, activeNgIds, externalRep
     "## 使用データの範囲",
     `退会分析: ${context?.cancellationLabel || "保存済み退会データ全体"}`,
     `退会理由分析: ${context?.surveyLabel || "保存済み退会アンケート全体"}`,
+    `カウンセリング分析: ${buildAiCounselingScopeLabel(data)}`,
     "",
     "## 安全な集計データ（個人情報・自由記述原文なし）",
     "### 退会分析",
