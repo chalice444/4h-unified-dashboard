@@ -2019,20 +2019,29 @@ function mergeCancellationSurveyImport(currentValue, parsed) {
   };
 }
 function emptyJoinSurvey() {
-  return { rows: [], imports: [], meta: { lastImportedAt: null, lastFileName: null, rowCount: 0, validCount: 0, skippedCount: 0, duplicateCount: 0, storeCounts: [] } };
+  return { rows: [], imports: [], meta: { lastImportedAt: null, lastFileName: null, rowCount: 0, validCount: 0, skippedCount: 0, duplicateCount: 0, storeCounts: [], storeCodeCounts: [], unknownStoreCodeCounts: [] } };
 }
 function normalizeJoinSurvey(value) {
   if (Array.isArray(value)) return { ...emptyJoinSurvey(), rows: value };
   if (!value || typeof value !== "object") return emptyJoinSurvey();
-  const rows = Array.isArray(value.rows) ? value.rows : [];
+  const rows = Array.isArray(value.rows) ? value.rows.map((row) => ({ ...row, store: joinSurveyStoreFromCode(row?.storeCode || row?.store) })) : [];
   const imports = Array.isArray(value.imports) ? value.imports : [];
-  return { rows, imports, meta: { ...emptyJoinSurvey().meta, ...(value.meta || {}) } };
+  return { rows, imports, meta: { ...emptyJoinSurvey().meta, ...(value.meta || {}), storeCounts: joinSurveyStoreCounts(rows), storeCodeCounts: joinSurveyStoreCodeCounts(rows), unknownStoreCodeCounts: joinSurveyUnknownStoreCodeCounts(rows) } };
+}
+function normalizeJoinSurveyStoreText(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .replace(/[\s　:：_\-ー‐‑‒–—―]/g, "")
+    .toUpperCase();
 }
 function joinSurveyStoreFromCode(codeRaw) {
-  const code = String(codeRaw || "").trim().toUpperCase();
-  if (code.includes("S0001") || code.includes("梅ヶ丘")) return "梅ヶ丘";
+  const code = normalizeJoinSurveyStoreText(codeRaw);
+  if (code.includes("S0001") || code.includes("梅ヶ丘") || code.includes("梅ケ丘") || code.includes("梅が丘") || code.includes("梅丘")) return "梅ヶ丘";
   if (code.includes("S0002") || code.includes("狛江")) return "狛江";
   return "不明";
+}
+function joinSurveyStoreFromFilename(filename) {
+  return joinSurveyStoreFromCode(filename);
 }
 function joinSurveyDedupKey(row) {
   const memberId = normalizeMemberId(row?.memberId);
@@ -2052,6 +2061,17 @@ function joinSurveyStoreCounts(rows) {
     counts[store] = (counts[store] || 0) + 1;
   }
   return Object.entries(counts).map(([store, count]) => ({ store, count })).sort((a, b) => a.store.localeCompare(b.store, "ja"));
+}
+function joinSurveyStoreCodeCounts(rows) {
+  const counts = {};
+  for (const row of rows || []) {
+    const code = String(row.storeCode || "").trim() || "空欄";
+    counts[code] = (counts[code] || 0) + 1;
+  }
+  return Object.entries(counts).map(([storeCode, count]) => ({ storeCode, count })).sort((a, b) => b.count - a.count || a.storeCode.localeCompare(b.storeCode, "ja"));
+}
+function joinSurveyUnknownStoreCodeCounts(rows) {
+  return joinSurveyStoreCodeCounts((rows || []).filter((row) => (row.store || "不明") === "不明"));
 }
 function joinSurveyCodeSummary(rawRows) {
   const counts = {};
@@ -2080,7 +2100,12 @@ function parseJoinSurveyRows(rawRows, filename = "") {
       continue;
     }
     const registeredDate = parseFlexibleDate(registeredAt);
-    const storeCode = String(rowValue(row, ["店舗コード", "店舗 コード", "storeCode", "store_code"]) || "").trim();
+    const storeCode = String(rowValue(row, [
+      "店舗コード", "店舗 コード", "所属店舗コード", "所属店舗 コード",
+      "メンバー_所属店舗コード", "メンバー所属店舗コード", "メンバー_店舗コード",
+      "店舗名", "所属店舗名", "メンバー_所属店舗名", "メンバー所属店舗名",
+      "所属店舗", "店舗", "storeCode", "store_code", "storeName", "store_name",
+    ]) || "").trim();
     const age = Number(rowValue(row, ["メンバー_年齢", "年齢"])) || null;
     const record = {
       registeredAt,
@@ -2093,7 +2118,7 @@ function parseJoinSurveyRows(rawRows, filename = "") {
       age,
       ageGroup: ageBandOf(age),
       storeCode,
-      store: joinSurveyStoreFromCode(storeCode),
+      store: joinSurveyStoreFromCode(storeCode) !== "不明" ? joinSurveyStoreFromCode(storeCode) : joinSurveyStoreFromFilename(filename),
       occupation: String(rowValue(row, ["職業"]) || "").trim(),
       firstKnownTiming: String(rowValue(row, ["4H fitnessを初めて知った時期", "初めて知った時期"]) || "").trim(),
       awarenessSource: joinSurveyAnswerValues(rowValue(row, ["どこで知ったか", "4H fitnessをどこで知ったか"])),
@@ -2124,6 +2149,8 @@ function parseJoinSurveyRows(rawRows, filename = "") {
       skippedCount: skipped,
       duplicateCount,
       storeCounts: joinSurveyStoreCounts(rows),
+      storeCodeCounts: joinSurveyStoreCodeCounts(rows),
+      unknownStoreCodeCounts: joinSurveyUnknownStoreCodeCounts(rows),
     },
   };
 }
@@ -2138,6 +2165,8 @@ function mergeJoinSurveyImport(currentValue, parsed) {
     skippedCount: parsed.skipped || 0,
     duplicateCount: parsed.meta?.duplicateCount || 0,
     storeCounts: joinSurveyStoreCounts(merged.rows),
+    storeCodeCounts: joinSurveyStoreCodeCounts(merged.rows),
+    unknownStoreCodeCounts: joinSurveyUnknownStoreCodeCounts(merged.rows),
     codeSummary: parsed.codeSummary || null,
   };
   return {
@@ -5663,6 +5692,11 @@ function JoinSurveyImportPanel({ data, updateData, showToast }) {
     if (summary.likelyAnswerId) return `コード列: ${summary.uniqueCount}種類。行ごとに一意の可能性があるため、重複キーには使いません`;
     return `コード列: ${summary.uniqueCount}種類。回答IDとしては使わず、参考情報として保存します`;
   };
+  const storeCodeSummaryText = (items) => {
+    const list = (items || []).slice(0, 6);
+    if (!list.length) return "不明判定の店舗コード: なし";
+    return `不明判定の店舗コード: ${list.map((item) => `${item.storeCode} ${item.count}件`).join(" / ")}`;
+  };
   const doParse = useCallback((text, name = "") => {
     const clean = String(text || "").replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
     Papa.parse(clean, {
@@ -5752,6 +5786,9 @@ function JoinSurveyImportPanel({ data, updateData, showToast }) {
             <div style={{ fontSize: 12, color: "var(--ink-faint)", marginBottom: 10 }}>
               {codeSummaryText(preview.codeSummary)}
             </div>
+            <div style={{ fontSize: 12, color: "var(--ink-faint)", marginBottom: 10 }}>
+              {storeCodeSummaryText(preview.meta.unknownStoreCodeCounts)}
+            </div>
             {preview.rows.length === 0 ? (
               <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginBottom: 10 }}>
                 <AlertTriangle size={14} /> 保存対象の入会時アンケートデータが見つかりません。登録日時とメンバーIDの列を確認してください。
@@ -5818,6 +5855,9 @@ function JoinSurveyImportPanel({ data, updateData, showToast }) {
           ) : (
             <span style={{ color: "var(--ink-faint)" }}>保存済みデータはありません。</span>
           )}
+        </div>
+        <div style={{ fontSize: 12, color: "var(--ink-faint)", marginBottom: 12 }}>
+          {storeCodeSummaryText(current.meta?.unknownStoreCodeCounts)}
         </div>
         {current.rows.length > 0 && (
           <div className="scrollbar-thin" style={{ maxHeight: 260, overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8 }}>
