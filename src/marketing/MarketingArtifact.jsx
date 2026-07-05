@@ -1882,7 +1882,7 @@ export default function App() {
             ))}
           </nav>
           <div style={{ marginTop:"auto",padding:"8px",fontSize:10.5,color:"var(--ink-faint)",lineHeight:1.6 }}>
-            {syncing ? "同期中…" : `会員 ${data.members.length}件 / アンケート ${data.questUme.length + data.questKom.length}件`}
+            {syncing ? "同期中…" : `会員 ${analysisMembers.length}件 / アンケート ${data.questUme.length + data.questKom.length}件`}
           </div>
         </aside>
 
