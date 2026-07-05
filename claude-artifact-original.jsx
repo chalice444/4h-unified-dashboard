@@ -339,6 +339,37 @@ function suggestMapping(headers, fields = REQUIRED_TRIAL_FIELDS) {
 function isFreeTrialTicket(ticketRaw) {
   return String(ticketRaw || "").includes("無料体験チケット");
 }
+function stableImportKey(parts) {
+  return parts.map((part) => String(part ?? "").trim()).join("__");
+}
+function mergeRowsByStableKey(currentRows, importedRows, keyFn, mergeRow = (_existing, incoming) => incoming) {
+  const map = new Map();
+  const fallbackKey = (row, index, side) => `${side}:${index}:${JSON.stringify(row)}`;
+  for (const [index, row] of (currentRows || []).entries()) {
+    const key = keyFn(row) || fallbackKey(row, index, "current");
+    map.set(key, row);
+  }
+  let addedCount = 0;
+  let updatedCount = 0;
+  for (const [index, row] of (importedRows || []).entries()) {
+    const key = keyFn(row) || fallbackKey(row, index, "import");
+    if (map.has(key)) {
+      updatedCount += 1;
+      map.set(key, mergeRow(map.get(key), row));
+    } else {
+      addedCount += 1;
+      map.set(key, row);
+    }
+  }
+  return { rows: [...map.values()], addedCount, updatedCount };
+}
+function trialImportKey(row) {
+  if (row?.reservationId) return `reservation:${row.reservationId}`;
+  return stableImportKey([row?.lessonDate, matchStoreName(row?.store || "") || row?.store, row?.memberId || row?.name, row?.startTime, row?.ticket]);
+}
+function joinImportKey(row) {
+  return stableImportKey([row?.memberId, row?.year, row?.month]);
+}
 // 生CSV行 + マッピング -> クレンジング済み入会候補（メンバーID＋プラン契約適用開始日の年月）
 function cleanJoinCsvRows(rawRows, mapping) {
   const out = [];
@@ -367,6 +398,7 @@ function cleanCsvRows(rawRows, mapping) {
     const memberId = memberIdRaw != null && String(memberIdRaw).trim() !== ""
       ? String(memberIdRaw).trim().replace(/[　\s]/g, "") : null;
     out.push({
+      reservationId: String(rowValue(row, ["予約ID", "予約 Id", "予約番号"]) || "").trim(),
       store, ticket: String(ticketRaw).trim(), lessonDate,
       applyDate: mapping.applyDate ? parseFlexibleDate(row[mapping.applyDate]) : null,
       startTime: mapping.startTime ? parseFlexibleTime(row[mapping.startTime]) : null,
@@ -381,31 +413,64 @@ function cleanCsvRows(rawRows, mapping) {
 }
 // 既存trialsとID重複チェック：先に存在するものを優先、新規取込側の重複はスキップ
 function dedupeAgainstExisting(candidates, existingTrials) {
-  const existingIds = new Set(existingTrials.filter((t) => t.memberId).map((t) => t.memberId));
+  const existingIds = new Set((existingTrials || []).map(trialImportKey));
   const seenInBatch = new Set();
   const accepted = [];
   let skipped = 0;
   for (const c of candidates) {
-    if (c.memberId) {
-      if (existingIds.has(c.memberId) || seenInBatch.has(c.memberId)) { skipped++; continue; }
-      seenInBatch.add(c.memberId);
-    }
+    const key = trialImportKey(c);
+    if (seenInBatch.has(key)) { skipped++; continue; }
+    seenInBatch.add(key);
     accepted.push(c);
   }
-  return { accepted, skipped };
+  const updated = accepted.filter((row) => existingIds.has(trialImportKey(row))).length;
+  return { accepted, skipped, added: accepted.length - updated, updated };
 }
 function dedupeJoins(candidates, existingJoins) {
-  const existingIds = new Set(existingJoins.map((j) => j.memberId));
+  const existingIds = new Set((existingJoins || []).map(joinImportKey));
   const seenInBatch = new Set();
   const accepted = [];
   let skipped = 0;
   for (const c of candidates) {
     if (!c.memberId) { skipped++; continue; }
-    if (existingIds.has(c.memberId) || seenInBatch.has(c.memberId)) { skipped++; continue; }
-    seenInBatch.add(c.memberId);
+    const key = joinImportKey(c);
+    if (seenInBatch.has(key)) { skipped++; continue; }
+    seenInBatch.add(key);
     accepted.push(c);
   }
-  return { accepted, skipped };
+  const updated = accepted.filter((row) => existingIds.has(joinImportKey(row))).length;
+  return { accepted, skipped, added: accepted.length - updated, updated };
+}
+function mergeTrialImportRows(currentRows, importedRows) {
+  const map = new Map();
+  for (const row of currentRows || []) map.set(trialImportKey(row), row);
+  let nextId = nextTrialId(currentRows || []);
+  let addedCount = 0;
+  let updatedCount = 0;
+  for (const row of importedRows || []) {
+    const key = trialImportKey(row);
+    const existing = map.get(key);
+    if (existing) {
+      updatedCount += 1;
+      map.set(key, {
+        ...existing,
+        ...row,
+        id: existing.id,
+        staff: existing.staff,
+        note: existing.note,
+        manualJoinMonth: existing.manualJoinMonth,
+      });
+    } else {
+      const id = nextId;
+      nextId = `t${Number(nextId.slice(1)) + 1}`;
+      addedCount += 1;
+      map.set(key, { id, ...row });
+    }
+  }
+  return { rows: [...map.values()], addedCount, updatedCount };
+}
+function mergeJoinImportRows(currentRows, importedRows) {
+  return mergeRowsByStableKey(currentRows || [], importedRows || [], joinImportKey);
 }
 function rowValue(row, names) {
   for (const name of names) {
@@ -587,19 +652,7 @@ function normalizeCancellations(value) {
 function mergeCancellationImport(currentValue, parsed, source) {
   const current = normalizeCancellations(currentValue);
   const importMonths = [...new Set((parsed.rows || []).map(cancellationMonthOf).filter(Boolean))];
-  const importMonthSet = new Set(importMonths);
-  const nextRows = [
-    ...current.rows.filter((row) => !importMonthSet.has(cancellationMonthOf(row))),
-    ...parsed.rows,
-  ];
-  const deduped = [];
-  const seen = new Set();
-  for (const row of nextRows) {
-    const key = cancellationDedupKey(row);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    deduped.push(row);
-  }
+  const merged = mergeRowsByStableKey(current.rows, parsed.rows || [], cancellationDedupKey);
   const importedAt = new Date().toISOString();
   const imports = { ...current.imports };
   for (const ym of importMonths) {
@@ -611,10 +664,10 @@ function mergeCancellationImport(currentValue, parsed, source) {
     };
   }
   return {
-    rows: deduped,
+    rows: merged.rows,
     imports,
     importedAt,
-    source,
+    source: { ...(source || {}), addedCount: merged.addedCount, updatedCount: merged.updatedCount },
   };
 }
 function deleteCancellationMonth(currentValue, ym) {
@@ -846,12 +899,7 @@ function parseCounselingRows(rawRows) {
 }
 function mergeCounselingReservations(currentValue, rows) {
   const currentRows = normalizeCounselingReservations(currentValue);
-  const importMonths = [...new Set((rows || []).map(counselingMonthOf).filter(Boolean))];
-  const importMonthSet = new Set(importMonths);
-  return [
-    ...currentRows.filter((row) => !importMonthSet.has(counselingMonthOf(row))),
-    ...(rows || []),
-  ];
+  return mergeRowsByStableKey(currentRows, rows || [], counselingReservationKey).rows;
 }
 function deleteCounselingReservationMonth(currentValue, ym) {
   return normalizeCounselingReservations(currentValue).filter((row) => counselingMonthOf(row) !== ym);
@@ -968,6 +1016,12 @@ function counselingNewMemberMonthOf(row) {
 function counselingCancelMemberMonthOf(row) {
   return row?.cancelMonth || monthOfIsoDate(row?.planEndDate);
 }
+function counselingNewMemberImportKey(row) {
+  return stableImportKey([row?.memberId, row?.joinDate || row?.startDate || row?.planContractDate || row?.planStartDate]);
+}
+function counselingCancelMemberImportKey(row) {
+  return stableImportKey([row?.memberId, row?.planEndDate]);
+}
 function monthlyCounselingMemberCounts(rows, monthOf) {
   const counts = {};
   for (const row of rows || []) {
@@ -979,37 +1033,27 @@ function monthlyCounselingMemberCounts(rows, monthOf) {
     .map(([ym, count]) => ({ ym, count }))
     .sort((a, b) => a.ym.localeCompare(b.ym));
 }
-function mergeCounselingMemberMonthImport(currentValue, importedRows, stats, filename, monthOf) {
+function mergeCounselingMemberMonthImport(currentValue, importedRows, stats, filename, monthOf, keyFn) {
   const currentRows = Array.isArray(currentValue?.rows) ? currentValue.rows : normalizeCounselingNewMembers(currentValue);
   const importMonths = [...new Set((importedRows || []).map(monthOf).filter(Boolean))];
-  const importMonthSet = new Set(importMonths);
-  const nextRowsRaw = [
-    ...currentRows.filter((row) => !importMonthSet.has(monthOf(row))),
-    ...(importedRows || []),
-  ];
-  const nextRowsByMemberId = new Map();
-  for (const row of nextRowsRaw) {
-    const key = row?.memberId || JSON.stringify(row);
-    nextRowsByMemberId.set(key, row);
-  }
-  const nextRows = [...nextRowsByMemberId.values()];
+  const mergeKey = keyFn || ((row) => stableImportKey([row?.memberId, monthOf(row)]));
+  const merged = mergeRowsByStableKey(currentRows, importedRows || [], mergeKey);
   const importedAt = new Date().toISOString();
   const previousImports = normalizeCounselingMemberImports(currentValue);
   const nextImports = [
-    ...previousImports.filter((item) => {
-      const months = Array.isArray(item?.months) ? item.months : [item?.month].filter(Boolean);
-      return !months.some((month) => importMonthSet.has(month));
-    }),
+    ...previousImports,
     {
       importedAt,
       fileName: filename || null,
       months: importMonths,
       totalRows: stats?.rowCount || 0,
       validRows: (importedRows || []).length,
+      addedRows: merged.addedCount,
+      updatedRows: merged.updatedCount,
     },
   ];
   return {
-    rows: nextRows,
+    rows: merged.rows,
     imports: nextImports,
     meta: {
       lastImportedAt: importedAt,
@@ -1017,6 +1061,8 @@ function mergeCounselingMemberMonthImport(currentValue, importedRows, stats, fil
       importedAt,
       filename: filename || null,
       ...(stats || {}),
+      addedCount: merged.addedCount,
+      updatedCount: merged.updatedCount,
     },
   };
 }
@@ -1122,10 +1168,6 @@ function parseCounselingNewMembers(rawRows) {
       stats.blankMemberIdCount += 1;
       continue;
     }
-    if (map.has(memberId)) {
-      stats.duplicateMemberIdCount += 1;
-      console.warn("[counseling] duplicate new member id; later row wins", memberId);
-    }
     const storeRaw = String(activeMemberRowValue(row, ["所属店舗名"], { exact: true }) || "").trim();
     const joinDate = parseCounselingDate(activeMemberRowValue(row, ["入会日時"]));
     const planStartDate = parseCounselingDate(activeMemberRowValue(row, ["プラン契約適用開始日"]));
@@ -1146,7 +1188,12 @@ function parseCounselingNewMembers(rawRows) {
       planContractDate: parseCounselingDate(activeMemberRowValue(row, ["プラン契約日"])),
       planEndDate: parseCounselingDate(activeMemberRowValue(row, ["プラン契約適用終了日"])),
     };
-    map.set(memberId, newMember);
+    const key = counselingNewMemberImportKey(newMember);
+    if (map.has(key)) {
+      stats.duplicateMemberIdCount += 1;
+      console.warn("[counseling] duplicate new member event key; later row wins", key);
+    }
+    map.set(key, newMember);
   }
   const rows = [...map.values()];
   stats.validCount = rows.length;
@@ -1217,15 +1264,16 @@ function parseCounselingCancelMembers(rawRows, newMembersValue) {
     };
     if (!cancelMember.startDate) stats.unknownStartDateCount += 1;
     if (!cancelMember.cancelMonth) stats.unknownCancelMonthCount += 1;
-    if (map.has(memberId)) {
+    const key = counselingCancelMemberImportKey(cancelMember);
+    if (map.has(key)) {
       stats.duplicateMemberIdCount += 1;
-      const existing = map.get(memberId);
+      const existing = map.get(key);
       const existingEnd = existing.planEndDate || "";
       const incomingEnd = cancelMember.planEndDate || "";
-      console.warn("[counseling] duplicate cancel member id; selecting latest plan end date or later row", memberId);
+      console.warn("[counseling] duplicate cancel member event key; selecting latest plan end date or later row", key);
       if (incomingEnd < existingEnd) continue;
     }
-    map.set(memberId, cancelMember);
+    map.set(key, cancelMember);
   }
   const rows = [...map.values()];
   stats.validCount = rows.length;
@@ -1833,6 +1881,25 @@ function replaceCancellationSurveyImport(parsed) {
     rows: parsed.rows || [],
     imports: [{ ...(parsed.meta || {}), importedAt: parsed.meta?.lastImportedAt }],
     meta: parsed.meta || emptyCancellationSurvey().meta,
+  };
+}
+function mergeCancellationSurveyImport(currentValue, parsed) {
+  const current = normalizeCancellationSurvey(currentValue);
+  const merged = mergeRowsByStableKey(current.rows, parsed.rows || [], cancellationSurveyDedupKey);
+  const meta = {
+    ...(parsed.meta || emptyCancellationSurvey().meta),
+    addedCount: merged.addedCount,
+    updatedCount: merged.updatedCount,
+    savedCount: merged.rows.length,
+    registeredMonths: monthlyCancellationSurveyCounts(merged.rows),
+  };
+  return {
+    rows: merged.rows,
+    imports: [
+      ...current.imports,
+      { ...meta, importedAt: meta.lastImportedAt },
+    ],
+    meta,
   };
 }
 function cancellationSurveyPeriodFromMode(mode, customStartYm, customEndYm, rows) {
@@ -4368,13 +4435,12 @@ function TrialImportPanel({ data, updateData, showToast }) {
 
   const handleImport = async () => {
     if (!dedup.accepted.length) { showToast("取り込める新規データがありません。", true); return; }
-    let nextId = nextTrialId(data.trials);
-    const newRows = dedup.accepted.map((r) => {
-      const id = nextId; nextId = `t${Number(nextId.slice(1)) + 1}`;
-      return { id, ...r };
+    let result = null;
+    await updateData("trials", (cur) => {
+      result = mergeTrialImportRows(cur, dedup.accepted);
+      return result.rows;
     });
-    await updateData("trials", (cur) => [...cur, ...newRows]);
-    showToast(`${newRows.length}件を取り込みました（重複スキップ${dedup.skipped}件）`);
+    showToast(`${dedup.accepted.length}件を保存しました（追加 ${result?.addedCount || 0}件・更新 ${result?.updatedCount || 0}件・重複除外 ${dedup.skipped}件）`);
     setCsvText(""); setRawRows(null); setHeaders([]); setMapping(null);
     if (fileRef.current) fileRef.current.value = "";
   };
@@ -4713,7 +4779,7 @@ function JoinImportPanel({ data, updateData, showToast }) {
       return;
     }
     if (dedup.accepted.length) {
-      await updateData("joins", (cur) => [...cur, ...dedup.accepted]);
+      await updateData("joins", (cur) => mergeJoinImportRows(cur, dedup.accepted).rows);
     }
     let counselingFailed = false;
     let counselingWarning = "";
@@ -4725,7 +4791,8 @@ function JoinImportPanel({ data, updateData, showToast }) {
             counselingImport.rows,
             counselingImport.stats,
             counselingImport.filename,
-            counselingNewMemberMonthOf
+            counselingNewMemberMonthOf,
+            counselingNewMemberImportKey
           )
         ));
         counselingWarning = counselingImport.warnings?.join(" ") || "";
@@ -4965,7 +5032,8 @@ function CancellationImportPanel({ data, updateData, showToast }) {
         counselingRows,
         preview.counselingStats,
         preview.source?.filename,
-        counselingCancelMemberMonthOf
+        counselingCancelMemberMonthOf,
+        counselingCancelMemberImportKey
       )
     ));
     showToast(`退会者データ ${preview.rows.length}件を保存し、カウンセリング分析用退会者データ ${counselingRows.length}件も更新しました`);
@@ -5167,7 +5235,7 @@ function CancellationSurveyImportPanel({ data, updateData, showToast }) {
       showToast("保存対象の退会者アンケートデータがありません。", true);
       return;
     }
-    await updateData("cancellationSurvey", () => replaceCancellationSurveyImport(preview));
+    await updateData("cancellationSurvey", (cur) => mergeCancellationSurveyImport(cur, preview));
     showToast(`退会者アンケート ${preview.rows.length}件を保存しました`);
     reset();
   };
@@ -6174,7 +6242,8 @@ function CancelMemberImportPanel({ data, updateData, showToast }) {
         cancelMembersImportStats.rows,
         cancelMembersImportStats.stats,
         cancelMembersImportStats.filename,
-        counselingCancelMemberMonthOf
+        counselingCancelMemberMonthOf,
+        counselingCancelMemberImportKey
       )
     ));
     showToast(`退会者 ${cancelMembersImportStats.rows.length}件を保存しました`);
