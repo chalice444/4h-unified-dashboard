@@ -3048,6 +3048,7 @@ const NAV_SECTIONS = [
     items: [
       { key: "cvr", label: "CVR分析", icon: BarChart3 },
       { key: "cancellation", label: "退会分析", icon: UserMinus },
+      { key: "joinReason", label: "入会理由分析", icon: UserPlus },
       { key: "counseling", label: "カウンセリング分析", icon: UserCog },
       { key: "marketing", label: "マーケティング分析", icon: Target },
     ],
@@ -3714,6 +3715,264 @@ function CancellationSurveyTextTable({ title, rows, permission = false }) {
     </div>
   );
 }
+
+function joinReasonRows(data) {
+  return normalizeJoinSurvey(data?.joinSurvey).rows || [];
+}
+function joinReasonAgeGroup(row) {
+  const age = Number(row?.age);
+  if (!age || isNaN(age)) return "不明";
+  if (age < 30) return "20代以下";
+  if (age < 40) return "30代";
+  if (age < 50) return "40代";
+  if (age < 60) return "50代";
+  return "60代以上";
+}
+function joinReasonGender(row) {
+  const value = String(row?.gender || "").trim();
+  if (!value) return "不明";
+  if (value.includes("女")) return "女性";
+  if (value.includes("男")) return "男性";
+  if (value.includes("その他")) return "その他";
+  return "不明";
+}
+function joinReasonAnswerText(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  if (text.length > 44) return "その他・自由記述";
+  if (/@|メール|電話|TEL|tel|\d{3,}/i.test(text)) return "その他・自由記述";
+  return text;
+}
+function joinReasonAnswerList(value) {
+  const source = Array.isArray(value) ? value : String(value || "").split(/\r?\n|[,、／\/;；]/);
+  return [...new Set(source.map(joinReasonAnswerText).filter(Boolean))];
+}
+function joinReasonRanking(rows, field, { multi = false, unanswered = true, limit = 10 } = {}) {
+  const counts = {};
+  for (const row of rows || []) {
+    const values = multi ? joinReasonAnswerList(row?.[field]) : [joinReasonAnswerText(row?.[field])].filter(Boolean);
+    if (!values.length) {
+      if (unanswered) counts["未回答"] = (counts["未回答"] || 0) + 1;
+      continue;
+    }
+    for (const value of values) counts[value] = (counts[value] || 0) + 1;
+  }
+  return Object.entries(counts)
+    .map(([label, count]) => ({ label, count, rate: rows?.length ? count / rows.length : null }))
+    .sort((a, b) => (a.label === "未回答" ? 1 : 0) - (b.label === "未回答" ? 1 : 0) || b.count - a.count || a.label.localeCompare(b.label, "ja"))
+    .slice(0, limit);
+}
+function joinReasonStoreCounts(rows) {
+  const counts = { all: rows.length, unknown: 0 };
+  for (const store of STORE_KEYS) counts[store] = 0;
+  for (const row of rows || []) {
+    if (STORE_KEYS.includes(row.store)) counts[row.store] += 1;
+    else counts.unknown += 1;
+  }
+  return counts;
+}
+function joinReasonFilterRows(rows, filters) {
+  return (rows || []).filter((row) => {
+    if (filters.store !== "all") {
+      const rowStore = STORE_KEYS.includes(row.store) ? row.store : "unknown";
+      if (rowStore !== filters.store) return false;
+    }
+    if (filters.age !== "all" && joinReasonAgeGroup(row) !== filters.age) return false;
+    if (filters.gender !== "all" && joinReasonGender(row) !== filters.gender) return false;
+    return true;
+  });
+}
+function JoinReasonKpiCard({ label, value, sub }) {
+  return (
+    <div className="f4h-card" style={{ padding: 14, display: "grid", gap: 7, minWidth: 0 }}>
+      <div style={{ fontSize: 11.5, color: "var(--ink-soft)", fontWeight: 800 }}>{label}</div>
+      <div className="num" style={{ fontSize: 25, fontWeight: 800, lineHeight: 1.1 }}>{value}</div>
+      <div style={{ fontSize: 11, color: "var(--ink-faint)" }}>{sub}</div>
+    </div>
+  );
+}
+function JoinReasonRankingCard({ title, rows, total }) {
+  const max = Math.max(1, ...rows.map((row) => row.count));
+  return (
+    <div className="f4h-card scrollbar-thin" style={{ padding: 16, overflowX: "auto" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline", marginBottom: 10 }}>
+        <div style={{ fontWeight: 800, fontSize: 14 }}>{title}</div>
+        <div style={{ fontSize: 11, color: "var(--ink-faint)" }}>対象 {num(total)}人</div>
+      </div>
+      {rows.length === 0 ? (
+        <div style={{ color: "var(--ink-faint)", fontSize: 12.5 }}>表示できる回答がありません。</div>
+      ) : (
+        <table className="f4h-table" style={{ fontSize: 12.5 }}>
+          <thead><tr><th>順位</th><th>項目</th><th>件数</th><th>構成比</th><th>グラフ</th></tr></thead>
+          <tbody>
+            {rows.map((row, index) => (
+              <tr key={`${title}-${row.label}`}>
+                <td className="num">{index + 1}</td>
+                <td style={{ textAlign: "left", fontWeight: 700, maxWidth: 340, whiteSpace: "normal" }}>{row.label}</td>
+                <td className="num">{num(row.count)}件</td>
+                <td className="num">{pct1(row.rate)}</td>
+                <td style={{ minWidth: 160 }}>
+                  <div style={{ height: 9, borderRadius: 99, background: "var(--bg-soft)", overflow: "hidden" }}>
+                    <div style={{ width: `${Math.round((row.count / max) * 100)}%`, height: "100%", borderRadius: 99, background: "var(--ink)" }} />
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <div style={{ marginTop: 8, fontSize: 11, color: "var(--ink-faint)", lineHeight: 1.6 }}>
+        複数回答項目の構成比は、回答総数ではなく集計対象人数に対する割合です。そのため合計が100%を超える場合があります。
+      </div>
+    </div>
+  );
+}
+function JoinReasonTopByGroupCard({ title, groups, rows, groupOf }) {
+  return (
+    <div className="f4h-card scrollbar-thin" style={{ padding: 16, overflowX: "auto" }}>
+      <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 10 }}>{title}</div>
+      <table className="f4h-table" style={{ fontSize: 12.5 }}>
+        <thead><tr><th>区分</th><th>対象</th><th>1位</th><th>2位</th><th>3位</th></tr></thead>
+        <tbody>
+          {groups.map((group) => {
+            const groupRows = rows.filter((row) => groupOf(row) === group.key);
+            const top = joinReasonRanking(groupRows, "joinReasons", { multi: true, unanswered: false, limit: 3 });
+            return (
+              <tr key={group.key}>
+                <td style={{ fontWeight: 800 }}>{group.label}</td>
+                <td className="num">{num(groupRows.length)}人</td>
+                {[0, 1, 2].map((idx) => (
+                  <td key={idx} style={{ textAlign: "left", minWidth: 160 }}>
+                    {top[idx] ? `${top[idx].label}（${num(top[idx].count)}件 / ${pct1(top[idx].rate)}）` : "データなし"}
+                  </td>
+                ))}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+function JoinReasonAnalysisView({ data }) {
+  const rows = joinReasonRows(data);
+  const storeCounts = joinReasonStoreCounts(rows);
+  const [storeFilter, setStoreFilter] = useState("all");
+  const [ageFilter, setAgeFilter] = useState("all");
+  const [genderFilter, setGenderFilter] = useState("all");
+  const filteredRows = useMemo(() => joinReasonFilterRows(rows, { store: storeFilter, age: ageFilter, gender: genderFilter }), [rows, storeFilter, ageFilter, genderFilter]);
+  const filteredStoreCounts = joinReasonStoreCounts(filteredRows);
+  const importedAt = data.joinSurvey?.meta?.lastImportedAt ? new Date(data.joinSurvey.meta.lastImportedAt).toLocaleString("ja-JP") : "—";
+  const importedFile = data.joinSurvey?.meta?.lastFileName || "—";
+  const storeOptions = [{ key: "all", label: "全店" }, ...STORE_KEYS.map((store) => ({ key: store, label: store })), { key: "unknown", label: "不明" }];
+  const ageOptions = ["20代以下", "30代", "40代", "50代", "60代以上", "不明"].map((label) => ({ key: label, label }));
+  const genderOptions = ["女性", "男性", "その他", "不明"].map((label) => ({ key: label, label }));
+  const rankingDefs = [
+    { title: "入会を決めた理由ランキング", field: "joinReasons", multi: true },
+    { title: "どこで知ったかランキング", field: "awarenessSource", multi: true },
+    { title: "体験予約時に参考にした情報ランキング", field: "reservationReferenceInfo", multi: true },
+    { title: "体験予約時に参考にした内容ランキング", field: "reservationReferenceContent", multi: true },
+    { title: "職業別構成", field: "occupation", multi: false },
+    { title: "公式LINE認知", field: "lineAwareness", multi: false },
+    { title: "過去ジム経験", field: "pastGymExperience", multi: true },
+    { title: "初めて知った時期", field: "firstKnownTiming", multi: false },
+  ];
+  const storeGroups = [...STORE_KEYS.map((store) => ({ key: store, label: store })), { key: "unknown", label: "不明" }];
+  const ageGroups = ["20代以下", "30代", "40代", "50代", "60代以上", "不明"].map((label) => ({ key: label, label }));
+  const genderGroups = ["女性", "男性", "その他", "不明"].map((label) => ({ key: label, label }));
+
+  if (!rows.length) {
+    return (
+      <div className="f4h-fade-in" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        <SectionHeading eyebrow="入会理由分析" title="入会時アンケートCSVの分析" />
+        <div className="f4h-card">
+          <EmptyState
+            icon={UserPlus}
+            title="入会時アンケートCSVが未取込です"
+            sub="データ入力の「入会時アンケートCSV」タブからCSVを取り込んでください。"
+          />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="f4h-fade-in" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <SectionHeading eyebrow="入会理由分析" title="入会時アンケートCSVの分析" />
+
+      <div className="f4h-card" style={{ padding: 16, display: "grid", gap: 10 }}>
+        <div style={{ fontSize: 12.5, color: "var(--ink-soft)", lineHeight: 1.7 }}>
+          入会時アンケートCSVをもとに、入会理由・認知経路・体験予約時に参考にした情報・過去ジム経験などを集計します。
+          個人名・メンバーID・個別回答一覧は表示しません。
+        </div>
+        <div style={{ fontSize: 11.5, color: "var(--ink-faint)", lineHeight: 1.7 }}>
+          複数回答項目は選択肢ごとに1件として集計します。自由記述らしい長文は「その他・自由記述」に寄せ、AI分析アシスタントには送信しません。
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12 }}>
+        <JoinReasonKpiCard label="保存済み件数" value={`${num(rows.length)}件`} sub="joinSurvey rows" />
+        <JoinReasonKpiCard label="集計対象件数" value={`${num(filteredRows.length)}件`} sub="現在のフィルター条件" />
+        <JoinReasonKpiCard label="梅ヶ丘" value={`${num(storeCounts[STORE_KEYS[0]] || 0)}件`} sub="保存済み店舗別" />
+        <JoinReasonKpiCard label="狛江" value={`${num(storeCounts[STORE_KEYS[1]] || 0)}件`} sub="保存済み店舗別" />
+        <JoinReasonKpiCard label="不明" value={`${num(storeCounts.unknown || 0)}件`} sub="保存済み店舗別" />
+      </div>
+
+      <div className="f4h-card" style={{ padding: 14, display: "grid", gap: 10 }}>
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 12.5, color: "var(--ink-soft)" }}>
+          <CounselingStatLine label="最終取込日時" value={importedAt} />
+          <CounselingStatLine label="最終取込ファイル" value={importedFile} />
+          <CounselingStatLine label="全店" value={`${num(storeCounts.all)}件`} />
+          {STORE_KEYS.map((store) => <CounselingStatLine key={store} label={store} value={`${num(storeCounts[store] || 0)}件`} />)}
+          <CounselingStatLine label="不明" value={`${num(storeCounts.unknown || 0)}件`} />
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ fontSize: 12, color: "var(--ink-faint)", fontWeight: 700 }}>店舗</span>
+          {storeOptions.map((item) => <Pill key={item.key} active={storeFilter === item.key} onClick={() => setStoreFilter(item.key)}>{item.label}</Pill>)}
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ fontSize: 12, color: "var(--ink-faint)", fontWeight: 700 }}>年齢層</span>
+          <Pill active={ageFilter === "all"} onClick={() => setAgeFilter("all")}>全体</Pill>
+          {ageOptions.map((item) => <Pill key={item.key} active={ageFilter === item.key} onClick={() => setAgeFilter(item.key)}>{item.label}</Pill>)}
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ fontSize: 12, color: "var(--ink-faint)", fontWeight: 700 }}>性別</span>
+          <Pill active={genderFilter === "all"} onClick={() => setGenderFilter("all")}>全体</Pill>
+          {genderOptions.map((item) => <Pill key={item.key} active={genderFilter === item.key} onClick={() => setGenderFilter(item.key)}>{item.label}</Pill>)}
+        </div>
+        <div style={{ fontSize: 11.5, color: "var(--ink-faint)", lineHeight: 1.6 }}>
+          現在の集計対象: 全店 {num(filteredStoreCounts.all)}件 / {STORE_KEYS.map((store) => `${store} ${num(filteredStoreCounts[store] || 0)}件`).join(" / ")} / 不明 {num(filteredStoreCounts.unknown || 0)}件
+        </div>
+      </div>
+
+      {filteredRows.length === 0 ? (
+        <div className="f4h-card">
+          <EmptyState icon={Info} title="条件に一致するデータがありません" sub="店舗・年齢層・性別フィルターを変更してください。" />
+        </div>
+      ) : (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 12 }}>
+            {rankingDefs.map((def) => (
+              <JoinReasonRankingCard
+                key={def.field}
+                title={def.title}
+                rows={joinReasonRanking(filteredRows, def.field, { multi: def.multi, unanswered: true, limit: 10 })}
+                total={filteredRows.length}
+              />
+            ))}
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 12 }}>
+            <JoinReasonTopByGroupCard title="店舗別 入会理由TOP" groups={storeGroups} rows={filteredRows} groupOf={(row) => STORE_KEYS.includes(row.store) ? row.store : "unknown"} />
+            <JoinReasonTopByGroupCard title="年齢層別 入会理由TOP" groups={ageGroups} rows={filteredRows} groupOf={joinReasonAgeGroup} />
+            <JoinReasonTopByGroupCard title="性別別 入会理由TOP" groups={genderGroups} rows={filteredRows} groupOf={joinReasonGender} />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function AiPromptModal({ data, settings, context, showToast, onClose }) {
   const normalized = normalizeAiAssistantSettings(settings);
   const [mode, setMode] = useState("A");
@@ -8579,6 +8838,7 @@ export default function App() {
           {nav === "entry" && <DataEntryView data={data} updateData={updateData} showToast={showToast} />}
           {nav === "monthlyReport" && <MonthlyReportView data={data} />}
           {nav === "cancellation" && <CancellationAnalysisView data={data} showToast={showToast} />}
+          {nav === "joinReason" && <JoinReasonAnalysisView data={data} />}
           {nav === "counseling" && <CounselingAnalysisView data={data} updateData={updateData} showToast={showToast} onNavigate={setNav} />}
           {nav === "cvr" && <CvrAnalysisView data={data} />}
           {nav === "marketing" && (
