@@ -698,17 +698,17 @@ const COUNSELING_TICKETS = [
 ];
 const COUNSELING_STAGE_LABELS = {
   0: "初回未実施",
-  1: "初回済み",
-  2: "2回目済み",
-  3: "3回目済み",
-  4: "4回目以降済み",
+  1: "2回目未実施",
+  2: "3回目未実施",
+  3: "3回済み・次回4回目待ち",
+  4: "4回目以降到達",
 };
 const COUNSELING_PROGRESS_DEFINITION = [
   "0回：初回カウンセリング未実施",
-  "1回：初回カウンセリングまで実施",
-  "2回：2回目カウンセリングまで実施",
-  "3回：3回目カウンセリングまで実施",
-  "4回目以降：4回目以降カウンセリング実施済み",
+  "1回：2回目カウンセリング未実施",
+  "2回：3回目カウンセリング未実施",
+  "3回：3回済み・次回4回目待ち",
+  "4回目以降：4回目以降到達",
 ];
 function normalizeCounselingTicketName(ticketRaw) {
   return String(ticketRaw || "")
@@ -6445,33 +6445,63 @@ const COUNSELING_PERIOD_TABS = [
 function CounselingPeriodFilter({ periodMode, setPeriodMode, customStartYm, setCustomStartYm, customEndYm, setCustomEndYm, basisLabel }) {
   const startParts = (customStartYm || counselingCurrentYm()).split("-").map(Number);
   const endParts = (customEndYm || customStartYm || counselingCurrentYm()).split("-").map(Number);
+  const handlePeriodModeChange = (mode) => {
+    setPeriodMode(mode);
+    const nextPeriod = counselingPeriodFromMode(mode, customStartYm, customEndYm);
+    if (nextPeriod.startYm) setCustomStartYm(nextPeriod.startYm);
+    if (nextPeriod.endYm) setCustomEndYm(nextPeriod.endYm);
+  };
+  const handleStartYmChange = (y, m) => {
+    setPeriodMode("custom");
+    setCustomStartYm(cancellationYm(y, m));
+  };
+  const handleEndYmChange = (y, m) => {
+    setPeriodMode("custom");
+    setCustomEndYm(cancellationYm(y, m));
+  };
   return (
     <div className="f4h-card" style={{ padding: 14, display: "grid", gap: 10 }}>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         <span style={{ fontSize: 12, color: "var(--ink-faint)", fontWeight: 800 }}>{basisLabel}で絞り込み中</span>
         {COUNSELING_PERIOD_TABS.map((tab) => (
-          <Pill key={tab.key} active={periodMode === tab.key} onClick={() => setPeriodMode(tab.key)}>{tab.label}</Pill>
+          <Pill key={tab.key} active={periodMode === tab.key} onClick={() => handlePeriodModeChange(tab.key)}>{tab.label}</Pill>
         ))}
       </div>
-      {periodMode === "custom" && (
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-          <span style={{ fontSize: 12, color: "var(--ink-faint)", fontWeight: 700 }}>開始月</span>
-          <MonthPicker year={startParts[0]} month={startParts[1]} onChange={(y, m) => setCustomStartYm(cancellationYm(y, m))} />
-          <span style={{ fontSize: 12, color: "var(--ink-faint)", fontWeight: 700 }}>終了月</span>
-          <MonthPicker year={endParts[0]} month={endParts[1]} onChange={(y, m) => setCustomEndYm(cancellationYm(y, m))} />
-        </div>
-      )}
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+        <span style={{ fontSize: 12, color: "var(--ink-faint)", fontWeight: 700 }}>開始月</span>
+        <MonthPicker year={startParts[0]} month={startParts[1]} onChange={handleStartYmChange} />
+        <span style={{ fontSize: 12, color: "var(--ink-faint)", fontWeight: 700 }}>終了月</span>
+        <MonthPicker year={endParts[0]} month={endParts[1]} onChange={handleEndYmChange} />
+      </div>
     </div>
   );
 }
 function counselingActionListRows(rows, key) {
   if (key === "first") return rows.filter((row) => row.checkedStage === 0);
-  if (key === "second") return rows.filter((row) => row.checkedStage <= 1);
-  if (key === "third") return rows.filter((row) => row.checkedStage <= 2);
+  if (key === "second") return rows.filter((row) => row.checkedStage === 1);
+  if (key === "third") return rows.filter((row) => row.checkedStage === 2);
   if (key === "under3") return rows.filter((row) => row.checkedStage < 3);
   if (key === "under4") return rows.filter((row) => row.checkedStage < 4);
   if (key === "retiringUnder3") return rows.filter((row) => row.statusCategory === "退会予定" && row.checkedStage < 3);
   return rows;
+}
+function counselingProgressBuckets(rows) {
+  const count0 = rows.filter((row) => row.checkedStage === 0).length;
+  const count1 = rows.filter((row) => row.checkedStage === 1).length;
+  const count2 = rows.filter((row) => row.checkedStage === 2).length;
+  const count3 = rows.filter((row) => row.checkedStage === 3).length;
+  const count4Plus = rows.filter((row) => row.checkedStage >= 4).length;
+  return {
+    target: rows.length,
+    count0,
+    count1,
+    count2,
+    count3,
+    count4Plus,
+    under3: count0 + count1 + count2,
+    reached3: count3 + count4Plus,
+    under4: count0 + count1 + count2 + count3,
+  };
 }
 function CounselingActionListTable({ rows, mode = "active", limit = 120 }) {
   const visibleRows = rows.slice(0, limit);
@@ -6582,11 +6612,8 @@ function CounselingCollapsibleSection({ title, sub, open, onToggle, children }) 
   );
 }
 
-function ActiveCounselingProgressSection({ data }) {
+function ActiveCounselingProgressSection({ data, periodMode, setPeriodMode, customStartYm, setCustomStartYm, customEndYm, setCustomEndYm }) {
   const [storeFilter, setStoreFilter] = useState("all");
-  const [periodMode, setPeriodMode] = useState("all");
-  const [customStartYm, setCustomStartYm] = useState(counselingCurrentYm());
-  const [customEndYm, setCustomEndYm] = useState(counselingCurrentYm());
   const [listMode, setListMode] = useState("first");
   const progressRows = useMemo(
     () => buildActiveCounselingProgress(data.counselingActiveMembers, data.counselingReservations),
@@ -6597,13 +6624,8 @@ function ActiveCounselingProgressSection({ data }) {
     if (storeFilter !== "all" && row.store !== storeFilter) return false;
     return counselingYmInPeriod(row.startMonth, period);
   }), [progressRows, storeFilter, period]);
-  const total = filteredRows.length;
-  const stageCounts = [0, 1, 2, 3, 4].map((stage) => (
-    stage === 4 ? filteredRows.filter((row) => row.checkedStage >= 4).length : filteredRows.filter((row) => row.checkedStage === stage).length
-  ));
-  const reached3 = filteredRows.filter((row) => row.checkedStage >= 3).length;
-  const under3 = filteredRows.filter((row) => row.checkedStage < 3).length;
-  const under4 = filteredRows.filter((row) => row.checkedStage < 4).length;
+  const buckets = counselingProgressBuckets(filteredRows);
+  const { target, count0, count1, count2, count3, count4Plus, reached3, under3, under4 } = buckets;
   const retiring = filteredRows.filter((row) => row.statusCategory === "退会予定").length;
   const retiringFirstMissing = filteredRows.filter((row) => row.statusCategory === "退会予定" && row.checkedStage === 0).length;
   const retiringUnder3 = filteredRows.filter((row) => row.statusCategory === "退会予定" && row.checkedStage < 3).length;
@@ -6613,7 +6635,7 @@ function ActiveCounselingProgressSection({ data }) {
     { key: "second", label: "2回目未実施" },
     { key: "third", label: "3回目未実施" },
     { key: "under3", label: "3回未満" },
-    { key: "under4", label: "4回未到達" },
+    { key: "under4", label: "4回未満到達" },
   ];
   const actionRows = counselingActionListRows(filteredRows, listMode);
   const retiringUnder3Rows = counselingActionListRows(filteredRows, "retiringUnder3");
@@ -6646,19 +6668,19 @@ function ActiveCounselingProgressSection({ data }) {
       />
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(132px, 1fr))", gap: 10, marginBottom: 14 }}>
-        <CounselingKpiCard label="在籍者数" value={`${num(total)}人`} />
-        <CounselingKpiCard label="初回未実施" value={`${num(stageCounts[0])}人`} sub="0回" />
-        <CounselingKpiCard label="初回済み" value={`${num(stageCounts[1])}人`} sub="1回" />
-        <CounselingKpiCard label="2回目済み" value={`${num(stageCounts[2])}人`} sub="2回" />
-        <CounselingKpiCard label="3回目済み" value={`${num(stageCounts[3])}人`} sub="3回" />
-        <CounselingKpiCard label="4回目以降済み" value={`${num(stageCounts[4])}人`} sub="4回目以降" />
-        <CounselingKpiCard label="3回目到達率" value={total ? pct1(reached3 / total) : "—"} />
+        <CounselingKpiCard label="在籍者数" value={`${num(target)}人`} />
+        <CounselingKpiCard label="初回未実施" value={`${num(count0)}人`} sub="0回" />
+        <CounselingKpiCard label="2回目未実施" value={`${num(count1)}人`} sub="1回" />
+        <CounselingKpiCard label="3回目未実施" value={`${num(count2)}人`} sub="2回" />
+        <CounselingKpiCard label="3回済み・次回4回目待ち" value={`${num(count3)}人`} sub="3回" />
+        <CounselingKpiCard label="4回目以降到達" value={`${num(count4Plus)}人`} sub="4回目以降" />
+        <CounselingKpiCard label="3回目到達率" value={target ? pct1(reached3 / target) : "—"} />
         <CounselingKpiCard label="3回未満人数" value={`${num(under3)}人`} />
-        <CounselingKpiCard label="4回目以降未到達人数" value={`${num(under4)}人`} />
+        <CounselingKpiCard label="4回未満人数" value={`${num(under4)}人`} />
         <CounselingKpiCard label="退会予定者数" value={`${num(retiring)}人`} />
         <CounselingKpiCard label="退会予定かつ初回未実施" value={`${num(retiringFirstMissing)}人`} />
         <CounselingKpiCard label="退会予定かつ3回未満" value={`${num(retiringUnder3)}人`} />
-        <CounselingKpiCard label="退会予定かつ4回未到達" value={`${num(retiringUnder4)}人`} />
+        <CounselingKpiCard label="退会予定かつ4回未満" value={`${num(retiringUnder4)}人`} />
       </div>
 
       <CounselingDefinitionNote />
@@ -6787,11 +6809,8 @@ function isInDateRange(dateStr, range) {
   return true;
 }
 
-function NewMemberCounselingProgressSection({ data }) {
+function NewMemberCounselingProgressSection({ data, periodMode, setPeriodMode, customStartYm, setCustomStartYm, customEndYm, setCustomEndYm }) {
   const [storeFilter, setStoreFilter] = useState("all");
-  const [periodMode, setPeriodMode] = useState("all");
-  const [customStartYm, setCustomStartYm] = useState(counselingCurrentYm());
-  const [customEndYm, setCustomEndYm] = useState(counselingCurrentYm());
   const period = useMemo(() => counselingPeriodFromMode(periodMode, customStartYm, customEndYm), [periodMode, customStartYm, customEndYm]);
   const progressRows = useMemo(
     () => buildNewMemberCounselingProgress(data.counselingNewMembers, data.counselingReservations),
@@ -6801,13 +6820,8 @@ function NewMemberCounselingProgressSection({ data }) {
     if (storeFilter !== "all" && row.store !== storeFilter) return false;
     return counselingYmInPeriod(row.startMonth, period);
   }), [progressRows, storeFilter, period]);
-  const total = filteredRows.length;
-  const stageCounts = [0, 1, 2, 3, 4].map((stage) => (
-    stage === 4 ? filteredRows.filter((row) => row.checkedStage >= 4).length : filteredRows.filter((row) => row.checkedStage === stage).length
-  ));
-  const reached3 = filteredRows.filter((row) => row.checkedStage >= 3).length;
-  const under3 = filteredRows.filter((row) => row.checkedStage < 3).length;
-  const under4 = filteredRows.filter((row) => row.checkedStage < 4).length;
+  const buckets = counselingProgressBuckets(filteredRows);
+  const { target, count0, count1, count2, count3, count4Plus, reached3, under3, under4 } = buckets;
 
   return (
     <div className="f4h-card" style={{ padding: 18 }}>
@@ -6836,15 +6850,15 @@ function NewMemberCounselingProgressSection({ data }) {
       />
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(132px, 1fr))", gap: 10, marginBottom: 14 }}>
-        <CounselingKpiCard label="新規入会者数" value={`${num(total)}人`} sub={period.label} />
-        <CounselingKpiCard label="初回未実施" value={`${num(stageCounts[0])}人`} sub="0回" />
-        <CounselingKpiCard label="初回済み" value={`${num(stageCounts[1])}人`} sub="1回" />
-        <CounselingKpiCard label="2回目済み" value={`${num(stageCounts[2])}人`} sub="2回" />
-        <CounselingKpiCard label="3回目済み" value={`${num(stageCounts[3])}人`} sub="3回" />
-        <CounselingKpiCard label="4回目以降済み" value={`${num(stageCounts[4])}人`} sub="4回目以降" />
-        <CounselingKpiCard label="3回目到達率" value={total ? pct1(reached3 / total) : "—"} />
+        <CounselingKpiCard label="新規入会者数" value={`${num(target)}人`} sub={period.label} />
+        <CounselingKpiCard label="初回未実施" value={`${num(count0)}人`} sub="0回" />
+        <CounselingKpiCard label="2回目未実施" value={`${num(count1)}人`} sub="1回" />
+        <CounselingKpiCard label="3回目未実施" value={`${num(count2)}人`} sub="2回" />
+        <CounselingKpiCard label="3回済み・次回4回目待ち" value={`${num(count3)}人`} sub="3回" />
+        <CounselingKpiCard label="4回目以降到達" value={`${num(count4Plus)}人`} sub="4回目以降" />
+        <CounselingKpiCard label="3回目到達率" value={target ? pct1(reached3 / target) : "—"} />
         <CounselingKpiCard label="3回未満人数" value={`${num(under3)}人`} />
-        <CounselingKpiCard label="4回目以降未到達人数" value={`${num(under4)}人`} />
+        <CounselingKpiCard label="4回未満人数" value={`${num(under4)}人`} />
       </div>
 
       <CounselingDefinitionNote />
@@ -6896,11 +6910,8 @@ function NewMemberCounselingProgressSection({ data }) {
   );
 }
 
-function CancelMemberCounselingProgressSection({ data }) {
+function CancelMemberCounselingProgressSection({ data, periodMode, setPeriodMode, customStartYm, setCustomStartYm, customEndYm, setCustomEndYm }) {
   const [storeFilter, setStoreFilter] = useState("all");
-  const [periodMode, setPeriodMode] = useState("all");
-  const [customStartYm, setCustomStartYm] = useState(counselingCurrentYm());
-  const [customEndYm, setCustomEndYm] = useState(counselingCurrentYm());
   const period = useMemo(() => counselingPeriodFromMode(periodMode, customStartYm, customEndYm), [periodMode, customStartYm, customEndYm]);
   const progressRows = useMemo(
     () => buildCancelMemberCounselingProgress(data.counselingCancelMembers, data.counselingReservations),
@@ -6910,13 +6921,8 @@ function CancelMemberCounselingProgressSection({ data }) {
     if (storeFilter !== "all" && row.store !== storeFilter) return false;
     return counselingYmInPeriod(row.cancelMonth, period);
   }), [progressRows, storeFilter, period]);
-  const total = filteredRows.length;
-  const stageCounts = [0, 1, 2, 3, 4].map((stage) => (
-    stage === 4 ? filteredRows.filter((row) => row.checkedStage >= 4).length : filteredRows.filter((row) => row.checkedStage === stage).length
-  ));
-  const reached3 = filteredRows.filter((row) => row.checkedStage >= 3).length;
-  const under3 = filteredRows.filter((row) => row.checkedStage < 3).length;
-  const under4 = filteredRows.filter((row) => row.checkedStage < 4).length;
+  const buckets = counselingProgressBuckets(filteredRows);
+  const { target, count0, count1, count2, count3, count4Plus, reached3, under3, under4 } = buckets;
 
   return (
     <div className="f4h-card" style={{ padding: 18 }}>
@@ -6945,15 +6951,15 @@ function CancelMemberCounselingProgressSection({ data }) {
       />
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(132px, 1fr))", gap: 10, marginBottom: 14 }}>
-        <CounselingKpiCard label="退会者数" value={`${num(total)}人`} sub={period.label} />
-        <CounselingKpiCard label="初回未実施" value={`${num(stageCounts[0])}人`} sub="0回" />
-        <CounselingKpiCard label="初回済み" value={`${num(stageCounts[1])}人`} sub="1回" />
-        <CounselingKpiCard label="2回目済み" value={`${num(stageCounts[2])}人`} sub="2回" />
-        <CounselingKpiCard label="3回目済み" value={`${num(stageCounts[3])}人`} sub="3回" />
-        <CounselingKpiCard label="4回目以降済み" value={`${num(stageCounts[4])}人`} sub="4回目以降" />
-        <CounselingKpiCard label="3回目到達率" value={total ? pct1(reached3 / total) : "—"} />
+        <CounselingKpiCard label="退会者数" value={`${num(target)}人`} sub={period.label} />
+        <CounselingKpiCard label="初回未実施" value={`${num(count0)}人`} sub="0回" />
+        <CounselingKpiCard label="2回目未実施" value={`${num(count1)}人`} sub="1回" />
+        <CounselingKpiCard label="3回目未実施" value={`${num(count2)}人`} sub="2回" />
+        <CounselingKpiCard label="3回済み・次回4回目待ち" value={`${num(count3)}人`} sub="3回" />
+        <CounselingKpiCard label="4回目以降到達" value={`${num(count4Plus)}人`} sub="4回目以降" />
+        <CounselingKpiCard label="3回目到達率" value={target ? pct1(reached3 / target) : "—"} />
         <CounselingKpiCard label="3回未満人数" value={`${num(under3)}人`} />
-        <CounselingKpiCard label="4回目以降未到達人数" value={`${num(under4)}人`} />
+        <CounselingKpiCard label="4回未満人数" value={`${num(under4)}人`} />
       </div>
 
       <CounselingDefinitionNote />
@@ -7022,6 +7028,9 @@ function CounselingAnalysisView({ data, updateData, showToast, onNavigate }) {
     cancelMembers: false,
   });
   const [analysisTab, setAnalysisTab] = useState("activeMembers");
+  const [counselingPeriodMode, setCounselingPeriodMode] = useState("all");
+  const [counselingStartYm, setCounselingStartYm] = useState(counselingCurrentYm());
+  const [counselingEndYm, setCounselingEndYm] = useState(counselingCurrentYm());
   const toggleImportSection = (key) => setOpenImports((state) => ({ ...state, [key]: !state[key] }));
 
   const reset = () => {
@@ -7287,9 +7296,39 @@ function CounselingAnalysisView({ data, updateData, showToast, onNavigate }) {
             <Pill active={analysisTab === "cancelMembers"} onClick={() => setAnalysisTab("cancelMembers")}>退会者</Pill>
           </div>
         </div>
-        {analysisTab === "activeMembers" && <ActiveCounselingProgressSection data={data} />}
-        {analysisTab === "newMembers" && <NewMemberCounselingProgressSection data={data} />}
-        {analysisTab === "cancelMembers" && <CancelMemberCounselingProgressSection data={data} />}
+        {analysisTab === "activeMembers" && (
+          <ActiveCounselingProgressSection
+            data={data}
+            periodMode={counselingPeriodMode}
+            setPeriodMode={setCounselingPeriodMode}
+            customStartYm={counselingStartYm}
+            setCustomStartYm={setCounselingStartYm}
+            customEndYm={counselingEndYm}
+            setCustomEndYm={setCounselingEndYm}
+          />
+        )}
+        {analysisTab === "newMembers" && (
+          <NewMemberCounselingProgressSection
+            data={data}
+            periodMode={counselingPeriodMode}
+            setPeriodMode={setCounselingPeriodMode}
+            customStartYm={counselingStartYm}
+            setCustomStartYm={setCounselingStartYm}
+            customEndYm={counselingEndYm}
+            setCustomEndYm={setCounselingEndYm}
+          />
+        )}
+        {analysisTab === "cancelMembers" && (
+          <CancelMemberCounselingProgressSection
+            data={data}
+            periodMode={counselingPeriodMode}
+            setPeriodMode={setCounselingPeriodMode}
+            customStartYm={counselingStartYm}
+            setCustomStartYm={setCounselingStartYm}
+            customEndYm={counselingEndYm}
+            setCustomEndYm={setCounselingEndYm}
+          />
+        )}
       </section>
     </div>
   );
