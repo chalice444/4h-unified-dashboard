@@ -462,6 +462,19 @@ function getMultiFieldValues(row, prefix) {
 
 const pct = (n, d) => d ? `${(n / d * 100).toFixed(1)}%` : "—";
 const num = (n) => n == null ? "—" : Math.round(n).toLocaleString("ja-JP");
+function normalizeStaffPlanText(value) {
+  return String(value ?? "").normalize("NFKC").replace(/[　\s]/g, "").toLowerCase();
+}
+function isStaffPlan(row) {
+  const values = [row?.planName, row?.contractPlanName, row?.["契約プラン名"], row?.["プラン名"]];
+  return values.some((value) => {
+    const text = normalizeStaffPlanText(value);
+    return text ? text.includes("スタッフプラン") : false;
+  });
+}
+function analysisRows(rows) {
+  return (rows || []).filter((row) => !isStaffPlan(row));
+}
 
 // ============================================================
 // CSV パーサー
@@ -1833,20 +1846,21 @@ export default function App() {
 
   const onUpdate = useCallback((partial) => setData(d => ({ ...d, ...partial })), []);
 
-  const hasMembers = data.members.length > 0;
+  const analysisMembers = useMemo(() => analysisRows(data.members), [data.members]);
+  const hasMembers = analysisMembers.length > 0;
   const hasQuest = data.questUme.length > 0 || data.questKom.length > 0;
   const showPeriodBar = ["channel","motivation","attr","map","area"].includes(nav) && (hasQuest || hasMembers);
 
   const filteredMembers = useMemo(() => {
-    if (!data.members.length) return data.members;
+    if (!analysisMembers.length) return analysisMembers;
     const range = period !== "all" ? getDateRange(period, customStart, customEnd) : null;
-    if (!range) return data.members;
-    return data.members.filter(m => {
+    if (!range) return analysisMembers;
+    return analysisMembers.filter(m => {
       if (!m.joinDate) return false;
       const d = new Date(m.joinDate + "T00:00:00");
       return d >= range.start && d <= range.end;
     });
-  }, [data.members, period, customStart, customEnd]);
+  }, [analysisMembers, period, customStart, customEnd]);
 
   return (
     <div className="m4h-root" style={{ minHeight:"100vh" }}>
@@ -1879,7 +1893,7 @@ export default function App() {
           {nav==="area" && (!hasMembers ? <Empty icon={Target} title="会員データがありません" sub="まずデータ取込から会員データ（ML009）を取り込んでください" /> : <AreaSummary members={filteredMembers} />)}
           {nav==="channel" && (!hasQuest ? <Empty icon={Zap} title="アンケートデータがありません" sub="まずデータ取込からアンケート回答CSVを取り込んでください" /> : <ChannelView questUme={data.questUme} questKom={data.questKom} period={period} customStart={customStart} customEnd={customEnd} />)}
           {nav==="motivation" && (!hasQuest ? <Empty icon={Heart} title="アンケートデータがありません" sub="まずデータ取込からアンケート回答CSVを取り込んでください" /> : <MotivationView questUme={data.questUme} questKom={data.questKom} period={period} customStart={customStart} customEnd={customEnd} />)}
-          {nav==="attr" && <AttributeView members={data.members} questUme={data.questUme} questKom={data.questKom} period={period} customStart={customStart} customEnd={customEnd} />}
+          {nav==="attr" && <AttributeView members={analysisMembers} questUme={data.questUme} questKom={data.questKom} period={period} customStart={customStart} customEnd={customEnd} />}
         </main>
       </div>
 

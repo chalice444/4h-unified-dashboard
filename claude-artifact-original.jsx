@@ -82,7 +82,7 @@ function effectiveJoinMonthAuto(trial, joinsMap) {
 }
 function buildJoinsMap(joins) {
   const m = new Map();
-  for (const j of joins) if (j.memberId && !m.has(j.memberId)) m.set(j.memberId, j);
+  for (const j of analysisRows(joins)) if (j.memberId && !m.has(j.memberId)) m.set(j.memberId, j);
   return m;
 }
 // ある体験が「入会につながったか」を判定する。
@@ -422,6 +422,16 @@ function cleanJoinCsvRows(rawRows, mapping) {
       startDate: iso,
       joinDate: parseCounselingDate(activeMemberRowValue(row, ["入会日時"])),
       planContractDate: parseCounselingDate(activeMemberRowValue(row, ["プラン契約日"])),
+      store: matchStoreName(activeMemberRowValue(row, ["所属店舗名"], { exact: true })) || String(activeMemberRowValue(row, ["所属店舗名"], { exact: true }) || "").trim(),
+      name: String(activeMemberRowValue(row, ["氏名", "名前", "会員名", "メンバー名"]) || "").trim(),
+      gender: String(activeMemberRowValue(row, ["性別"]) || "").trim(),
+      age: Number(activeMemberRowValue(row, ["年齢"])) || null,
+      trialLessonDate: parseCounselingDate(activeMemberRowValue(row, ["無料体験会 受講日時", "無料体験会受講日時"])),
+      firstTrialLessonDate: parseCounselingDate(activeMemberRowValue(row, ["トライアル 初回受講日時", "トライアル初回受講日時"])),
+      planName: String(activeMemberRowValue(row, ["契約プラン名", "プラン名"]) || "").trim(),
+      planStartDate: parseCounselingDate(activeMemberRowValue(row, ["プラン契約適用開始日"])),
+      planEndDate: parseCounselingDate(activeMemberRowValue(row, ["プラン契約適用終了日"])),
+      couponName: String(activeMemberRowValue(row, ["クーポン名"]) || "").trim(),
     });
   }
   return out;
@@ -526,6 +536,24 @@ function rowValue(row, names) {
 }
 function normalizeMemberId(raw) {
   return raw != null ? String(raw).trim().replace(/[　\s]/g, "") : "";
+}
+function normalizeStaffPlanText(value) {
+  return String(value ?? "").normalize("NFKC").replace(/[　\s]/g, "").toLowerCase();
+}
+function isStaffPlan(row) {
+  const values = [
+    row?.planName,
+    row?.contractPlanName,
+    row?.["契約プラン名"],
+    row?.["プラン名"],
+  ];
+  return values.some((value) => {
+    const text = normalizeStaffPlanText(value);
+    return text ? text.includes("スタッフプラン") : false;
+  });
+}
+function analysisRows(rows) {
+  return (rows || []).filter((row) => !isStaffPlan(row));
 }
 function monthOfIsoDate(dateStr) {
   return dateStr ? dateStr.slice(0, 7) : null;
@@ -1362,7 +1390,7 @@ function buildActiveCounselingProgress(activeMembersValue, reservationsValue) {
     if (!reservationsByMember.has(r.memberId)) reservationsByMember.set(r.memberId, []);
     reservationsByMember.get(r.memberId).push(r);
   }
-  return normalizeCounselingActiveMembers(activeMembersValue).map((member) => {
+  return analysisRows(normalizeCounselingActiveMembers(activeMembersValue)).map((member) => {
     const memberReservations = reservationsByMember.get(member.memberId) || [];
     const checkedIn = memberReservations.filter((r) => counselingStatusIsCheckedIn(r.reservationStatus));
     const reservedIncluded = memberReservations.filter((r) => counselingStatusIsReserved(r.reservationStatus));
@@ -1405,7 +1433,7 @@ function buildNewMemberCounselingProgress(newMembersValue, reservationsValue) {
     if (!reservationsByMember.has(r.memberId)) reservationsByMember.set(r.memberId, []);
     reservationsByMember.get(r.memberId).push(r);
   }
-  return normalizeCounselingNewMembers(newMembersValue).map((member) => {
+  return analysisRows(normalizeCounselingNewMembers(newMembersValue)).map((member) => {
     const memberReservations = reservationsByMember.get(member.memberId) || [];
     const checkedIn = memberReservations.filter((r) => counselingStatusIsCheckedIn(r.reservationStatus));
     const reservedIncluded = memberReservations.filter((r) => counselingStatusIsReserved(r.reservationStatus));
@@ -1447,7 +1475,7 @@ function buildCancelMemberCounselingProgress(cancelMembersValue, reservationsVal
     if (!reservationsByMember.has(r.memberId)) reservationsByMember.set(r.memberId, []);
     reservationsByMember.get(r.memberId).push(r);
   }
-  return normalizeCounselingCancelMembers(cancelMembersValue).map((member) => {
+  return analysisRows(normalizeCounselingCancelMembers(cancelMembersValue)).map((member) => {
     const memberReservations = reservationsByMember.get(member.memberId) || [];
     const checkedIn = memberReservations.filter((r) => counselingStatusIsCheckedIn(r.reservationStatus));
     const reservedIncluded = memberReservations.filter((r) => counselingStatusIsReserved(r.reservationStatus));
@@ -1484,8 +1512,8 @@ function buildCancelMemberCounselingProgress(cancelMembersValue, reservationsVal
 }
 function cancellationRowsOf(data) {
   const value = data?.cancellations;
-  if (Array.isArray(value)) return value;
-  return Array.isArray(value?.rows) ? value.rows : [];
+  const rows = Array.isArray(value) ? value : (Array.isArray(value?.rows) ? value.rows : []);
+  return analysisRows(rows);
 }
 function countCancellations(rows, year, month) {
   const ym = `${year}-${String(month).padStart(2, "0")}`;
@@ -2371,9 +2399,9 @@ function counselingRowsValue(value, normalizer) {
 }
 function buildAiCounselingScopeLabel(data) {
   const reservations = normalizeCounselingReservations(data?.counselingReservations);
-  const activeRows = counselingRowsValue(data?.counselingActiveMembers, normalizeCounselingActiveMembers);
-  const newRows = counselingRowsValue(data?.counselingNewMembers, normalizeCounselingNewMembers);
-  const cancelRows = counselingRowsValue(data?.counselingCancelMembers, normalizeCounselingCancelMembers);
+  const activeRows = analysisRows(counselingRowsValue(data?.counselingActiveMembers, normalizeCounselingActiveMembers));
+  const newRows = analysisRows(counselingRowsValue(data?.counselingNewMembers, normalizeCounselingNewMembers));
+  const cancelRows = analysisRows(counselingRowsValue(data?.counselingCancelMembers, normalizeCounselingCancelMembers));
   if (!reservations.length && !activeRows.length && !newRows.length && !cancelRows.length) {
     return "保存済みカウンセリングデータなし";
   }
@@ -2381,9 +2409,9 @@ function buildAiCounselingScopeLabel(data) {
 }
 function buildAiCounselingSummary(data) {
   const reservations = normalizeCounselingReservations(data?.counselingReservations);
-  const activeRows = counselingRowsValue(data?.counselingActiveMembers, normalizeCounselingActiveMembers);
-  const newRows = counselingRowsValue(data?.counselingNewMembers, normalizeCounselingNewMembers);
-  const cancelRows = counselingRowsValue(data?.counselingCancelMembers, normalizeCounselingCancelMembers);
+  const activeRows = analysisRows(counselingRowsValue(data?.counselingActiveMembers, normalizeCounselingActiveMembers));
+  const newRows = analysisRows(counselingRowsValue(data?.counselingNewMembers, normalizeCounselingNewMembers));
+  const cancelRows = analysisRows(counselingRowsValue(data?.counselingCancelMembers, normalizeCounselingCancelMembers));
   if (!reservations.length && !activeRows.length && !newRows.length && !cancelRows.length) {
     return "カウンセリング分析: 未集計 / データ不足";
   }
