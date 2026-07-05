@@ -9,7 +9,7 @@ import {
   Clock, Calendar, Menu, Download, Save, RefreshCw, ArrowUpRight, ArrowDownRight,
   Minus, Award, BarChart3, FileText, UserCog, Target, Building2, Users,
   CheckCircle2, CircleDashed, AlertCircle, Eye, EyeOff, ArrowRight, Banknote,
-  UserPlus, UserMinus, Percent, Info, Loader2,
+  UserPlus, UserMinus, Percent, Info, Loader2, Copy,
 } from "lucide-react";
 import Papa from "papaparse";
 
@@ -1971,6 +1971,7 @@ const SK = {
   counselingActiveMembers: "counseling:activeMembers",
   counselingNewMembers: "counseling:newMembers",
   counselingCancelMembers: "counseling:cancelMembers",
+  aiAssistantSettings: "aiAssistantSettings",
 };
 function withTimeout(promise, ms, label) {
   return new Promise((resolve, reject) => {
@@ -2009,10 +2010,11 @@ async function ensureSeeded() {
   return true;
 }
 async function loadAllData() {
-  const [staff, trials, joins, memberMonthly, baselines, budgetTargets, revenueActuals, settings, cancellations, cancellationSurvey, counselingReservations, counselingMeta, counselingActiveMembers, counselingNewMembers, counselingCancelMembers] = await Promise.all([
+  const [staff, trials, joins, memberMonthly, baselines, budgetTargets, revenueActuals, settings, cancellations, cancellationSurvey, counselingReservations, counselingMeta, counselingActiveMembers, counselingNewMembers, counselingCancelMembers, aiAssistantSettings] = await Promise.all([
     sGet(SK.staff), sGet(SK.trials), sGet(SK.joins), sGet(SK.memberMonthly),
     sGet(SK.baselines), sGet(SK.budgetTargets), sGet(SK.revenueActuals), sGet(SK.settings),
     sGet(SK.cancellations), sGet(SK.cancellationSurvey), sGet(SK.counselingReservations), sGet(SK.counselingMeta), sGet(SK.counselingActiveMembers), sGet(SK.counselingNewMembers), sGet(SK.counselingCancelMembers),
+    sGet(SK.aiAssistantSettings),
   ]);
   return {
     staff: staff || SEED_DATA.staff,
@@ -2036,6 +2038,7 @@ async function loadAllData() {
     counselingCancelMembers: counselingCancelMembers && typeof counselingCancelMembers === "object" && !Array.isArray(counselingCancelMembers)
       ? { rows: normalizeCounselingCancelMembers(counselingCancelMembers), imports: normalizeCounselingMemberImports(counselingCancelMembers), meta: normalizeCounselingCancelMembersMeta(counselingCancelMembers) }
       : normalizeCounselingCancelMembers(counselingCancelMembers),
+    aiAssistantSettings: normalizeAiAssistantSettings(aiAssistantSettings),
   };
 }
 // read-modify-write: 同時編集での上書きリスクを下げる
@@ -2052,6 +2055,263 @@ async function mutate(key, mutateFn) {
     return confirmed == null ? next : confirmed;
   }
   return next;
+}
+
+const AI_NG_CONDITIONS = [
+  { id: "no_weak_basis", label: "数値根拠が弱い提案をしない" },
+  { id: "no_vague_staffing", label: "「声かけ徹底」だけの曖昧な施策にしない" },
+  { id: "kpi_required", label: "対象者・工数・KPI・期限を明記する" },
+  { id: "store_difference", label: "店舗差を無視しない" },
+  { id: "no_pii", label: "個人名・会員ID・メール・電話番号を含めない" },
+  { id: "no_raw_text", label: "自由記述や詳細記述の原文を含めない" },
+  { id: "unknown_is_shortage", label: "不明点は推測せずデータ不足と明記する" },
+];
+const AI_ASSISTANT_STORE_FIELDS = [
+  ["storeName", "店舗名"],
+  ["hours", "営業時間"],
+  ["closedDays", "休館日"],
+  ["staffedHours", "有人時間"],
+  ["unstaffedHours", "無人時間"],
+  ["targetCustomers", "主な対象顧客"],
+  ["facilityConstraints", "設備・運用制約"],
+  ["memo", "メモ"],
+];
+const AI_ASSISTANT_RESOURCE_FIELDS = [
+  ["extraWorkHours", "今月追加で使える工数"],
+  ["staffingCapacity", "スタッフ余力"],
+  ["priorityIssues", "優先課題"],
+  ["temporaryStaffingChanges", "一時的な人員変更"],
+  ["cannotDoThisMonth", "今月できないこと"],
+  ["memo", "メモ"],
+];
+const AI_ASSISTANT_MODE_TEMPLATES = {
+  A: "あなたは4H fitnessの退会抑止施策を検証する分析アシスタントです。添付の集計データだけを根拠に、実行可能な施策案を優先順位付きで提案してください。",
+  B: "あなたは4H fitnessの退会抑止施策を検証するレビュアーです。貼り付けられた外部レポートを、添付の集計データと店舗制約に照らして検証してください。",
+};
+function defaultAiAssistantSettings() {
+  return {
+    stores: Object.fromEntries(STORE_KEYS.map((store) => [store, {
+      storeName: store,
+      hours: "",
+      closedDays: "",
+      staffedHours: "",
+      unstaffedHours: "",
+      targetCustomers: "",
+      facilityConstraints: "",
+      memo: "",
+    }])),
+    monthlyResource: {
+      extraWorkHours: "",
+      staffingCapacity: "",
+      priorityIssues: "",
+      temporaryStaffingChanges: "",
+      cannotDoThisMonth: "",
+      memo: "",
+    },
+    ngConditions: Object.fromEntries(AI_NG_CONDITIONS.map((item) => [item.id, true])),
+    templates: { ...AI_ASSISTANT_MODE_TEMPLATES },
+  };
+}
+function normalizeAiAssistantSettings(value) {
+  const base = defaultAiAssistantSettings();
+  const src = value && typeof value === "object" ? value : {};
+  const stores = { ...base.stores };
+  for (const store of STORE_KEYS) {
+    stores[store] = { ...base.stores[store], ...(src.stores?.[store] || {}) };
+    if (!stores[store].storeName) stores[store].storeName = store;
+  }
+  return {
+    stores,
+    monthlyResource: { ...base.monthlyResource, ...(src.monthlyResource || {}) },
+    ngConditions: { ...base.ngConditions, ...(src.ngConditions || {}) },
+    templates: { ...base.templates, ...(src.templates || {}) },
+  };
+}
+function aiPct(count, total) {
+  return total ? `${((count / total) * 100).toFixed(1)}%` : "-";
+}
+function aiCountLine(label, count, total) {
+  return `- ${label}: ${num(count)}件 (${aiPct(count, total)})`;
+}
+function aiMonthLine(row) {
+  const stores = STORE_KEYS.map((store) => `${store} ${num(row[store] || 0)}件`).join(" / ");
+  return `- ${row.ym}: 全店 ${num(row.all || 0)}件 / ${stores}`;
+}
+function aiFormatStats(stats) {
+  return ["all", ...STORE_KEYS].map((key) => {
+    const label = key === "all" ? "全店" : key;
+    const item = stats?.[key] || {};
+    const avg = item.avg == null ? "-" : `${Number(item.avg).toFixed(1)}ヶ月`;
+    const median = item.median == null ? "-" : `${Number(item.median).toFixed(1)}ヶ月`;
+    return `- ${label}: 対象 ${num(item.count || 0)}件 / 平均 ${avg} / 中央値 ${median}`;
+  }).join("\n");
+}
+function aiFormatBreakdownRows(rows, total, key = "all") {
+  return (rows || []).map((row) => aiCountLine(row.label || row.reason || "不明", Number(row[key] || row.count || 0), total)).join("\n") || "- データなし";
+}
+function buildAiCancellationSummary(rows) {
+  const sourceRows = Array.isArray(rows) ? rows : [];
+  const singleRows = cancellationRowsAsSingleMonth(sourceRows);
+  const counts = countCancellations(singleRows, 2000, 1);
+  const tenure = cancellationTenureAnalysis(singleRows, 2000, 1);
+  const attributes = cancellationAttributeBreakdown(singleRows, 2000, 1);
+  const monthly = monthlyCancellationRows(sourceRows).slice(0, 12);
+  return [
+    `対象退会データ: 全店 ${num(counts.all || 0)}件`,
+    "店舗別件数:",
+    STORE_KEYS.map((store) => aiCountLine(store, counts[store] || 0, counts.all || 0)).join("\n") || "- データなし",
+    "在籍期間分布:",
+    aiFormatBreakdownRows(tenure.bands, counts.all || 0),
+    "在籍月数の平均・中央値:",
+    aiFormatStats(tenure.stats),
+    "年齢層別構成:",
+    aiFormatBreakdownRows(attributes.ageRows, counts.all || 0),
+    "性別構成:",
+    aiFormatBreakdownRows(attributes.genderRows, counts.all || 0),
+    "月別退会数（直近または対象範囲内の最大12行）:",
+    monthly.length ? monthly.map(aiMonthLine).join("\n") : "- データなし",
+  ].join("\n");
+}
+function buildAiSurveySummary(rows) {
+  const sourceRows = Array.isArray(rows) ? rows : [];
+  const total = sourceRows.length;
+  const environment = cancellationSurveyReasonRanking(sourceRows, CANCELLATION_SURVEY_ENVIRONMENT_REASONS, "environmentReasons").filter((row) => row.count > 0).slice(0, 8);
+  const service = cancellationSurveyReasonRanking(sourceRows, CANCELLATION_SURVEY_SERVICE_REASONS, "serviceReasons").filter((row) => row.count > 0).slice(0, 8);
+  const storeLines = STORE_KEYS.map((store) => {
+    const storeRows = sourceRows.filter((row) => row.store === store);
+    const top = cancellationSurveyTopReasons(storeRows, 3).join(" / ") || "主因データなし";
+    return `- ${store}: ${num(storeRows.length)}件 (${aiPct(storeRows.length, total)}) / 上位理由: ${top}`;
+  });
+  const ageLines = CANCELLATION_SURVEY_AGE_ROWS.map((label) => {
+    const ageRows = sourceRows.filter((row) => cancellationSurveyAgeBand(row.age) === label);
+    const top = cancellationSurveyTopReasons(ageRows, 2).join(" / ") || "主因データなし";
+    return `- ${label}: ${num(ageRows.length)}件 (${aiPct(ageRows.length, total)}) / 上位理由: ${top}`;
+  });
+  return [
+    `退会アンケート回答: ${num(total)}件`,
+    "環境要因ランキング:",
+    environment.length ? environment.map((row) => aiCountLine(row.reason, row.count, total)).join("\n") : "- データなし",
+    "サービス・継続要因ランキング:",
+    service.length ? service.map((row) => aiCountLine(row.reason, row.count, total)).join("\n") : "- データなし",
+    "店舗別傾向:",
+    storeLines.join("\n"),
+    "年齢層別傾向:",
+    ageLines.join("\n"),
+    "注記: 自由記述・詳細記述の原文、および個人を識別できる列は含めていません。",
+  ].join("\n");
+}
+function counselingRowsValue(value, normalizer) {
+  if (value && typeof value === "object" && !Array.isArray(value) && Array.isArray(value.rows)) return value.rows;
+  return normalizer(value);
+}
+function buildAiCounselingSummary(data) {
+  const reservations = normalizeCounselingReservations(data?.counselingReservations);
+  const activeRows = counselingRowsValue(data?.counselingActiveMembers, normalizeCounselingActiveMembers);
+  const newRows = counselingRowsValue(data?.counselingNewMembers, normalizeCounselingNewMembers);
+  const cancelRows = counselingRowsValue(data?.counselingCancelMembers, normalizeCounselingCancelMembers);
+  if (!reservations.length && !activeRows.length && !newRows.length && !cancelRows.length) {
+    return "カウンセリング分析: 未集計 / データ不足";
+  }
+  const stageCounts = counselingReservationStageCounts(reservations);
+  return [
+    `カウンセリング予約集計: ${num(reservations.length)}件`,
+    `- 初回: ${num(stageCounts[1] || 0)}件 / 2回目: ${num(stageCounts[2] || 0)}件 / 3回目: ${num(stageCounts[3] || 0)}件 / 4回目以降: ${num(stageCounts[4] || 0)}件`,
+    `対象会員集計: 既存 ${num(activeRows.length)}件 / 新規 ${num(newRows.length)}件 / 退会予定 ${num(cancelRows.length)}件`,
+    "注記: 個別会員名・会員ID・担当者別の個票は含めていません。詳細傾向は未集計の場合があります。",
+  ].join("\n");
+}
+function buildAiSettingsBlock(settings) {
+  const s = normalizeAiAssistantSettings(settings);
+  const storeLines = STORE_KEYS.map((store) => {
+    const item = s.stores[store] || {};
+    const details = AI_ASSISTANT_STORE_FIELDS
+      .map(([key, label]) => `${label}: ${item[key] || "未設定"}`)
+      .join(" / ");
+    return `- ${store}: ${details}`;
+  });
+  const resourceLines = AI_ASSISTANT_RESOURCE_FIELDS.map(([key, label]) => `- ${label}: ${s.monthlyResource[key] || "未設定"}`);
+  return ["店舗前提:", ...storeLines, "今月のリソース・制約:", ...resourceLines].join("\n");
+}
+function buildAiAssistantPrompt({ mode, data, settings, activeNgIds, externalReport, context }) {
+  const normalized = normalizeAiAssistantSettings(settings);
+  const survey = normalizeCancellationSurvey(data?.cancellationSurvey);
+  const cancellationRows = Array.isArray(context?.cancellationRows) ? context.cancellationRows : cancellationRowsOf(data);
+  const surveyRows = Array.isArray(context?.surveyRows) ? context.surveyRows : survey.rows;
+  const modeKey = mode === "B" ? "B" : "A";
+  const ngLines = AI_NG_CONDITIONS
+    .filter((item) => activeNgIds.includes(item.id))
+    .map((item) => `- ${item.label}`)
+    .join("\n") || "- 一時的に指定なし";
+  const modeRequest = modeKey === "B"
+    ? "外部レポートの主張を、下記の安全な集計データと店舗制約に照らして検証してください。妥当な点、根拠不足、修正すべき施策、追加で必要なデータを分けて出してください。"
+    : "下記の安全な集計データと店舗制約だけを使い、退会抑止の施策候補を優先順位付きで提案してください。";
+  const outputTemplate = normalized.templates[modeKey] || AI_ASSISTANT_MODE_TEMPLATES[modeKey];
+  return [
+    outputTemplate,
+    "",
+    "## 依頼",
+    modeRequest,
+    "",
+    "## 厳守事項",
+    "- 数値根拠が弱い断定をしないでください。",
+    "- 対象者、必要工数、人員、KPI、期限を具体化してください。",
+    "- 店舗差を必ず確認してください。",
+    "- 個人名、会員ID、メール、電話番号、自由記述原文、詳細記述原文を含めないでください。",
+    "- 不明な点は推測せず「データ不足」と明記してください。",
+    "",
+    "## 今回有効にするNG条件",
+    ngLines,
+    "",
+    "## 設定・運用前提",
+    buildAiSettingsBlock(normalized),
+    "",
+    "## 使用データの範囲",
+    `退会分析: ${context?.cancellationLabel || "保存済み退会データ全体"}`,
+    `退会理由分析: ${context?.surveyLabel || "保存済み退会アンケート全体"}`,
+    "",
+    "## 安全な集計データ（個人情報・自由記述原文なし）",
+    "### 退会分析",
+    buildAiCancellationSummary(cancellationRows),
+    "",
+    "### 退会理由分析",
+    buildAiSurveySummary(surveyRows),
+    "",
+    "### カウンセリング分析",
+    buildAiCounselingSummary(data),
+    ...(modeKey === "B" ? [
+      "",
+      "## 検証対象の外部レポート",
+      externalReport?.trim() || "未入力",
+    ] : []),
+    "",
+    "## 出力形式",
+    "- 重要な示唆",
+    "- 施策案（対象、工数、担当条件、KPI、期限、リスク）",
+    "- 店舗別に変えるべき点",
+    "- 根拠不足または追加確認が必要な点",
+  ].join("\n");
+}
+function collectAiKnownNames(data) {
+  const tokens = new Set();
+  const add = (value) => {
+    const text = String(value || "").trim();
+    if (text.length >= 2 && text.length <= 30) tokens.add(text);
+  };
+  for (const row of cancellationRowsOf(data).slice(0, 500)) add(row.name);
+  for (const row of normalizeCancellationSurvey(data?.cancellationSurvey).rows.slice(0, 500)) add(row.memberName);
+  return [...tokens];
+}
+function detectAiPromptPii(prompt, data) {
+  const text = String(prompt || "");
+  const warnings = [];
+  if (/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i.test(text)) warnings.push("メールアドレスらしき文字列");
+  if (/(?:\+81[-\s]?)?0\d{1,4}[-\s]?\d{1,4}[-\s]?\d{3,4}/.test(text)) warnings.push("電話番号らしき文字列");
+  if (/(メンバーID|会員ID|memberId)\s*[:：=]?\s*\d+/i.test(text)) warnings.push("会員IDらしき記載");
+  if (/(氏名|名前|memberName)\s*[:：=]/i.test(text)) warnings.push("氏名欄らしき記載");
+  if (/(freeText|detailText|自由記述\s*[:：=]|詳細記述\s*[:：=]|原文\s*[:：=])/i.test(text)) warnings.push("自由記述原文らしき記載");
+  const knownName = collectAiKnownNames(data).find((name) => text.includes(name));
+  if (knownName) warnings.push("保存データ内の氏名と一致する文字列");
+  return [...new Set(warnings)];
 }
 
 // ============================================================
@@ -3040,7 +3300,106 @@ function CancellationSurveyTextTable({ title, rows, permission = false }) {
     </div>
   );
 }
-function CancellationSurveyAnalysisView({ data }) {
+function AiPromptModal({ data, settings, context, showToast, onClose }) {
+  const normalized = normalizeAiAssistantSettings(settings);
+  const [mode, setMode] = useState("A");
+  const [externalReport, setExternalReport] = useState("");
+  const [activeNg, setActiveNg] = useState(() => ({ ...normalized.ngConditions }));
+  const [prompt, setPrompt] = useState("");
+  const [warnings, setWarnings] = useState([]);
+  const activeNgIds = AI_NG_CONDITIONS.filter((item) => activeNg[item.id]).map((item) => item.id);
+  const generate = () => {
+    const nextPrompt = buildAiAssistantPrompt({
+      mode,
+      data,
+      settings: normalized,
+      activeNgIds,
+      externalReport,
+      context,
+    });
+    setPrompt(nextPrompt);
+    setWarnings(detectAiPromptPii(nextPrompt, data));
+  };
+  const copyPrompt = async () => {
+    if (!prompt) return;
+    try {
+      await navigator.clipboard.writeText(prompt);
+      showToast?.(warnings.length ? "PII警告があります。内容を確認したうえでプロンプトをコピーしました。" : "AI施策検証プロンプトをコピーしました。");
+    } catch (e) {
+      showToast?.("クリップボードへのコピーに失敗しました。", true);
+    }
+  };
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(28,31,27,.45)", zIndex: 220, display: "grid", placeItems: "center", padding: 18 }}>
+      <div className="f4h-card scrollbar-thin" style={{ width: "min(1040px, 100%)", maxHeight: "92vh", overflow: "auto", padding: 0 }}>
+        <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border-soft)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+          <div>
+            <div style={{ fontWeight: 800, fontSize: 16 }}>AI施策検証</div>
+            <div style={{ fontSize: 11.5, color: "var(--ink-faint)", marginTop: 3 }}>外部API送信は行わず、個人情報と自由記述原文を除いた集計プロンプトだけを生成します。</div>
+          </div>
+          <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: 8 }} onClick={onClose} aria-label="閉じる"><X size={16} /></button>
+        </div>
+        <div style={{ padding: 16, display: "grid", gap: 14 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button className={`f4h-btn f4h-focus ${mode === "A" ? "f4h-btn-primary" : "f4h-btn-outline"}`} style={{ padding: "8px 13px" }} onClick={() => setMode("A")}>Mode A 自前分析</button>
+            <button className={`f4h-btn f4h-focus ${mode === "B" ? "f4h-btn-primary" : "f4h-btn-outline"}`} style={{ padding: "8px 13px" }} onClick={() => setMode("B")}>Mode B 外部レポート検証</button>
+          </div>
+          {mode === "B" && (
+            <label style={{ display: "grid", gap: 6, fontSize: 12, color: "var(--ink-soft)", fontWeight: 800 }}>
+              検証対象の外部レポート
+              <textarea
+                className="f4h-input"
+                value={externalReport}
+                onChange={(e) => setExternalReport(e.target.value)}
+                placeholder="ここに外部レポートを貼り付けます。個人情報が含まれる場合はコピー前に警告します。"
+                style={{ minHeight: 130, resize: "vertical", fontSize: 12.5, lineHeight: 1.6 }}
+              />
+            </label>
+          )}
+          <div className="f4h-card" style={{ padding: 12, background: "var(--surface-soft)" }}>
+            <div style={{ fontWeight: 800, fontSize: 12.5, marginBottom: 8 }}>一時的に有効にするNG条件</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 8 }}>
+              {AI_NG_CONDITIONS.map((item) => (
+                <label key={item.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--ink-soft)", fontWeight: 700 }}>
+                  <input type="checkbox" checked={!!activeNg[item.id]} onChange={(e) => setActiveNg((cur) => ({ ...cur, [item.id]: e.target.checked }))} />
+                  {item.label}
+                </label>
+              ))}
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "9px 14px" }} onClick={generate}><Target size={14} /> プロンプト生成</button>
+            <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "9px 14px" }} onClick={copyPrompt} disabled={!prompt}><Copy size={14} /> コピー</button>
+            <span style={{ fontSize: 11.5, color: "var(--ink-faint)" }}>生成データ範囲: {context?.cancellationLabel || context?.surveyLabel || "保存済みデータ"}</span>
+          </div>
+          {warnings.length > 0 && (
+            <div style={{ border: "1px solid var(--red-soft)", background: "var(--red-soft)", color: "var(--red)", borderRadius: 8, padding: 11, fontSize: 12, lineHeight: 1.6, fontWeight: 700 }}>
+              <AlertTriangle size={14} style={{ verticalAlign: "-2px", marginRight: 5 }} />
+              PII警告: {warnings.join("、")} が含まれている可能性があります。コピー前に内容を確認してください。
+            </div>
+          )}
+          <textarea
+            className="f4h-input"
+            value={prompt}
+            readOnly
+            placeholder="「プロンプト生成」を押すと、ここにAIへ貼り付けるプロンプトが表示されます。"
+            style={{ minHeight: 300, resize: "vertical", fontSize: 12, lineHeight: 1.55, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" }}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AiAssistantButton({ onClick }) {
+  return (
+    <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 13px" }} onClick={onClick}>
+      <Target size={14} /> AI施策検証
+    </button>
+  );
+}
+
+function CancellationSurveyAnalysisView({ data, showToast, aiContext }) {
   const survey = normalizeCancellationSurvey(data.cancellationSurvey);
   const rows = survey.rows;
   const latestYm = monthlyCancellationSurveyCounts(rows)[0]?.ym || cancellationYm(todayParts().year, todayParts().month);
@@ -3049,6 +3408,7 @@ function CancellationSurveyAnalysisView({ data }) {
   const [customEndYm, setCustomEndYm] = useState(latestYm);
   const [storeFilter, setStoreFilter] = useState("all");
   const [ageFilter, setAgeFilter] = useState("all");
+  const [aiOpen, setAiOpen] = useState(false);
   useEffect(() => {
     setCustomStartYm((v) => v || latestYm);
     setCustomEndYm((v) => v || latestYm);
@@ -3123,6 +3483,10 @@ function CancellationSurveyAnalysisView({ data }) {
         </div>
       </div>
 
+      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+        <AiAssistantButton onClick={() => setAiOpen(true)} />
+      </div>
+
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12 }}>
         <CancellationSurveyKpiCard label="回答者数" value={`${num(filteredRows.length)}人`} sub="選択条件内" />
         <CancellationSurveyKpiCard label="環境要因回答数" value={`${num(envRespondents)}人`} sub="1つ以上選択" />
@@ -3137,12 +3501,25 @@ function CancellationSurveyAnalysisView({ data }) {
 
       <CancellationSurveyStoreComparison rows={periodRows} />
       <CancellationSurveyAgeReasonTable rows={storeRows} />
+      {aiOpen && (
+        <AiPromptModal
+          data={data}
+          settings={data.aiAssistantSettings}
+          context={{
+            ...(aiContext || {}),
+            surveyRows: filteredRows,
+            surveyLabel: `退会理由分析フィルター: ${period.label} / ${storeFilterLabel} / ${ageFilterLabel}`,
+          }}
+          showToast={showToast}
+          onClose={() => setAiOpen(false)}
+        />
+      )}
       <CancellationSurveyTextTable title="自由記述一覧" rows={freeTextRows} />
     </div>
   );
 }
 
-function CancellationAnalysisView({ data }) {
+function CancellationAnalysisView({ data, showToast }) {
   const [analysisTab, setAnalysisTab] = useState("summary");
   const rows = useMemo(() => cancellationRowsOf(data), [data]);
   const latest = useMemo(() => latestCancellationYearMonth(rows), [rows]);
@@ -3157,6 +3534,7 @@ function CancellationAnalysisView({ data }) {
   const [detailStoreFilter, setDetailStoreFilter] = useState("all");
   const [detailBandFilter, setDetailBandFilter] = useState("all");
   const [detailBandChangedOnly, setDetailBandChangedOnly] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
 
   useEffect(() => {
     setCustomStartYm((v) => v || latestYm);
@@ -3444,6 +3822,10 @@ function CancellationAnalysisView({ data }) {
         <div style={{ fontSize: 11.5, color: "var(--ink-faint)", lineHeight: 1.7 }}>
           退会分析は退会者CSVの明細データをもとに集計しています。既存の月次レポート・退会率計算には反映していません。
         </div>
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+        <AiAssistantButton onClick={() => setAiOpen(true)} />
       </div>
 
       {selectedRows.length === 0 && (
@@ -3834,9 +4216,25 @@ function CancellationAnalysisView({ data }) {
           </div>
         )}
       </div>
+      {aiOpen && (
+        <AiPromptModal
+          data={data}
+          settings={data.aiAssistantSettings}
+          context={{
+            cancellationRows: selectedRows,
+            cancellationLabel: `退会サマリー: ${periodSummaryLabel} / ${storeFilterLabel}`,
+          }}
+          showToast={showToast}
+          onClose={() => setAiOpen(false)}
+        />
+      )}
       </>
       ) : (
-        <CancellationSurveyAnalysisView data={data} />
+        <CancellationSurveyAnalysisView
+          data={data}
+          showToast={showToast}
+          aiContext={{ cancellationRows: selectedRows, cancellationLabel: `退会サマリー: ${periodSummaryLabel} / ${storeFilterLabel}` }}
+        />
       )}
     </div>
   );
@@ -7212,6 +7610,105 @@ function downloadCsv(filename, rows) {
   document.body.removeChild(a); URL.revokeObjectURL(url);
 }
 
+function AiAssistantSettingsPanel({ data, updateData, showToast }) {
+  const [draft, setDraft] = useState(() => normalizeAiAssistantSettings(data.aiAssistantSettings));
+  useEffect(() => {
+    setDraft(normalizeAiAssistantSettings(data.aiAssistantSettings));
+  }, [data.aiAssistantSettings]);
+  const setStoreField = (store, key, value) => {
+    setDraft((cur) => ({
+      ...cur,
+      stores: {
+        ...cur.stores,
+        [store]: { ...(cur.stores?.[store] || {}), [key]: value },
+      },
+    }));
+  };
+  const setResourceField = (key, value) => {
+    setDraft((cur) => ({ ...cur, monthlyResource: { ...cur.monthlyResource, [key]: value } }));
+  };
+  const setTemplate = (key, value) => {
+    setDraft((cur) => ({ ...cur, templates: { ...cur.templates, [key]: value } }));
+  };
+  const save = async () => {
+    const normalized = normalizeAiAssistantSettings(draft);
+    await updateData("aiAssistantSettings", () => normalized);
+    showToast("AI分析アシスタント設定を保存しました。");
+  };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div className="f4h-card" style={{ padding: 18, display: "grid", gap: 14 }}>
+        <div>
+          <div style={{ fontWeight: 800, fontSize: 15 }}>AI分析アシスタント設定</div>
+          <div style={{ fontSize: 11.5, color: "var(--ink-faint)", marginTop: 4 }}>外部API送信は行いません。退会分析画面で生成するプロンプトの前提条件だけを保存します。</div>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12 }}>
+          {STORE_KEYS.map((store) => (
+            <div key={store} className="f4h-card" style={{ padding: 14, background: "var(--surface-soft)" }}>
+              <div style={{ fontWeight: 800, fontSize: 13, marginBottom: 10 }}>{store}</div>
+              <div style={{ display: "grid", gap: 8 }}>
+                {AI_ASSISTANT_STORE_FIELDS.map(([key, label]) => (
+                  <label key={key} style={{ display: "grid", gap: 5, fontSize: 11.5, color: "var(--ink-soft)", fontWeight: 800 }}>
+                    {label}
+                    {key === "memo" || key === "facilityConstraints" || key === "targetCustomers" ? (
+                      <textarea className="f4h-input" value={draft.stores?.[store]?.[key] || ""} onChange={(e) => setStoreField(store, key, e.target.value)} style={{ minHeight: 64, resize: "vertical", fontSize: 12.5 }} />
+                    ) : (
+                      <input className="f4h-input" value={draft.stores?.[store]?.[key] || ""} onChange={(e) => setStoreField(store, key, e.target.value)} style={{ fontSize: 12.5 }} />
+                    )}
+                  </label>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="f4h-card" style={{ padding: 18, display: "grid", gap: 12 }}>
+        <div style={{ fontWeight: 800, fontSize: 15 }}>今月のリソース・制約</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 10 }}>
+          {AI_ASSISTANT_RESOURCE_FIELDS.map(([key, label]) => (
+            <label key={key} style={{ display: "grid", gap: 5, fontSize: 11.5, color: "var(--ink-soft)", fontWeight: 800 }}>
+              {label}
+              <textarea className="f4h-input" value={draft.monthlyResource?.[key] || ""} onChange={(e) => setResourceField(key, e.target.value)} style={{ minHeight: 68, resize: "vertical", fontSize: 12.5 }} />
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <div className="f4h-card" style={{ padding: 18, display: "grid", gap: 12 }}>
+        <div style={{ fontWeight: 800, fontSize: 15 }}>既定NG条件</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))", gap: 8 }}>
+          {AI_NG_CONDITIONS.map((item) => (
+            <label key={item.id} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12, color: "var(--ink-soft)", fontWeight: 700 }}>
+              <input
+                type="checkbox"
+                checked={!!draft.ngConditions?.[item.id]}
+                onChange={(e) => setDraft((cur) => ({ ...cur, ngConditions: { ...cur.ngConditions, [item.id]: e.target.checked } }))}
+              />
+              {item.label}
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <div className="f4h-card" style={{ padding: 18, display: "grid", gap: 12 }}>
+        <div style={{ fontWeight: 800, fontSize: 15 }}>出力テンプレート</div>
+        <label style={{ display: "grid", gap: 5, fontSize: 11.5, color: "var(--ink-soft)", fontWeight: 800 }}>
+          Mode A 自前分析
+          <textarea className="f4h-input" value={draft.templates?.A || ""} onChange={(e) => setTemplate("A", e.target.value)} style={{ minHeight: 90, resize: "vertical", fontSize: 12.5, lineHeight: 1.6 }} />
+        </label>
+        <label style={{ display: "grid", gap: 5, fontSize: 11.5, color: "var(--ink-soft)", fontWeight: 800 }}>
+          Mode B 外部レポート検証
+          <textarea className="f4h-input" value={draft.templates?.B || ""} onChange={(e) => setTemplate("B", e.target.value)} style={{ minHeight: 90, resize: "vertical", fontSize: 12.5, lineHeight: 1.6 }} />
+        </label>
+        <div>
+          <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "9px 16px" }} onClick={save}><Save size={14} /> 保存する</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DataManagementPanel({ data, showToast, onResetAll }) {
   const [confirmReset, setConfirmReset] = useState(false);
   return (
@@ -7259,11 +7756,12 @@ function SettingsView({ data, updateData, showToast, onResetAll }) {
       <SectionHeading eyebrow="設定" title="ダッシュボードの設定" />
       <SubTabs tabs={[
         { key: "budget", label: "予算目標" }, { key: "staff", label: "スタッフ管理" },
-        { key: "general", label: "一般設定" }, { key: "data", label: "データ管理" },
+        { key: "general", label: "一般設定" }, { key: "aiAssistant", label: "AI分析アシスタント" }, { key: "data", label: "データ管理" },
       ]} active={tab} onChange={setTab} />
       {tab === "budget" && <BudgetTargetsPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "staff" && <StaffPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "general" && <GeneralSettingsPanel data={data} updateData={updateData} showToast={showToast} />}
+      {tab === "aiAssistant" && <AiAssistantSettingsPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "data" && <DataManagementPanel data={data} showToast={showToast} onResetAll={onResetAll} />}
     </div>
   );
@@ -7282,6 +7780,7 @@ export default function App() {
     counselingActiveMembers: [],
     counselingNewMembers: [],
     counselingCancelMembers: [],
+    aiAssistantSettings: defaultAiAssistantSettings(),
   }));
   const [syncing, setSyncing] = useState(true);
   const [nav, setNav] = useState("dashboard");
@@ -7335,6 +7834,7 @@ export default function App() {
       counselingActiveMembers: [],
       counselingNewMembers: [],
       counselingCancelMembers: [],
+      aiAssistantSettings: defaultAiAssistantSettings(),
     };
     await Promise.all(Object.keys(empty).map((k) => sSet(SK[k], empty[k])));
     await sSet(SK.meta, { initialized: true, seededAt: new Date().toISOString(), version: 1, resetAt: new Date().toISOString() });
@@ -7364,7 +7864,7 @@ export default function App() {
           {nav === "dashboard" && <DashboardView data={data} showToast={showToast} />}
           {nav === "entry" && <DataEntryView data={data} updateData={updateData} showToast={showToast} />}
           {nav === "monthlyReport" && <MonthlyReportView data={data} />}
-          {nav === "cancellation" && <CancellationAnalysisView data={data} />}
+          {nav === "cancellation" && <CancellationAnalysisView data={data} showToast={showToast} />}
           {nav === "counseling" && <CounselingAnalysisView data={data} updateData={updateData} showToast={showToast} onNavigate={setNav} />}
           {nav === "cvr" && <CvrAnalysisView data={data} />}
           {nav === "marketing" && (
