@@ -2057,7 +2057,7 @@ async function mutate(key, mutateFn) {
   return next;
 }
 
-const AI_NG_CONDITIONS = [
+const AI_NG_CONDITIONS_LEGACY = [
   { id: "no_weak_basis", label: "数値根拠が弱い提案をしない" },
   { id: "no_vague_staffing", label: "「声かけ徹底」だけの曖昧な施策にしない" },
   { id: "kpi_required", label: "対象者・工数・KPI・期限を明記する" },
@@ -2065,6 +2065,23 @@ const AI_NG_CONDITIONS = [
   { id: "no_pii", label: "個人名・会員ID・メール・電話番号を含めない" },
   { id: "no_raw_text", label: "自由記述や詳細記述の原文を含めない" },
   { id: "unknown_is_shortage", label: "不明点は推測せずデータ不足と明記する" },
+];
+const AI_NG_CONDITIONS = [
+  { id: "no_extra_staff", label: "追加人員・新規採用を前提とした施策は提案しない" },
+  { id: "no_daily_operation", label: "毎日運用が必要な施策は提案しない" },
+  { id: "no_extra_budget", label: "追加予算が必要な施策は提案しない" },
+  { id: "no_hours_change", label: "営業時間変更を前提とした施策は提案しない" },
+  { id: "no_phone_main", label: "電話対応を主軸にした施策は原則提案しない" },
+  { id: "no_heavy_training", label: "スタッフ教育負荷が重すぎる施策は提案しない" },
+  { id: "no_event_required", label: "イベント開催を前提とした施策は提案しない" },
+  { id: "no_vague_staffing", label: "根性論・声かけ徹底だけの施策は提案しない" },
+  { id: "no_weak_basis", label: "数値根拠が弱い施策は提案しない" },
+  { id: "store_difference", label: "店舗別の違いを無視した施策は提案しない" },
+  { id: "kpi_required", label: "検証KPIがない施策は提案しない" },
+  { id: "no_major_ops_change", label: "既存オペレーションを大きく崩す施策は提案しない" },
+  { id: "no_pii", label: "退会者・会員の個人情報を外部AIに渡す前提の施策は提案しない" },
+  { id: "no_raw_text", label: "現場スタッフの主観記録や自由記述に依存しすぎる施策は提案しない" },
+  { id: "no_one_shot", label: "1回きりで終わり、継続検証できない施策は提案しない" },
 ];
 const AI_ASSISTANT_STORE_FIELDS = [
   ["storeName", "店舗名"],
@@ -2123,7 +2140,7 @@ function normalizeAiAssistantSettings(value) {
   return {
     stores,
     monthlyResource: { ...base.monthlyResource, ...(src.monthlyResource || {}) },
-    ngConditions: { ...base.ngConditions, ...(src.ngConditions || {}) },
+    ngConditions: Object.fromEntries(AI_NG_CONDITIONS.map((item) => [item.id, src.ngConditions?.[item.id] ?? base.ngConditions[item.id]])),
     templates: { ...base.templates, ...(src.templates || {}) },
   };
 }
