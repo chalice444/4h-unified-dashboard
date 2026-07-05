@@ -2018,6 +2018,137 @@ function mergeCancellationSurveyImport(currentValue, parsed) {
     meta,
   };
 }
+function emptyJoinSurvey() {
+  return { rows: [], imports: [], meta: { lastImportedAt: null, lastFileName: null, rowCount: 0, validCount: 0, skippedCount: 0, duplicateCount: 0, storeCounts: [] } };
+}
+function normalizeJoinSurvey(value) {
+  if (Array.isArray(value)) return { ...emptyJoinSurvey(), rows: value };
+  if (!value || typeof value !== "object") return emptyJoinSurvey();
+  const rows = Array.isArray(value.rows) ? value.rows : [];
+  const imports = Array.isArray(value.imports) ? value.imports : [];
+  return { rows, imports, meta: { ...emptyJoinSurvey().meta, ...(value.meta || {}) } };
+}
+function joinSurveyStoreFromCode(codeRaw) {
+  const code = String(codeRaw || "").trim().toUpperCase();
+  if (code.includes("S0001") || code.includes("梅ヶ丘")) return "梅ヶ丘";
+  if (code.includes("S0002") || code.includes("狛江")) return "狛江";
+  return "不明";
+}
+function joinSurveyDedupKey(row) {
+  const memberId = normalizeMemberId(row?.memberId);
+  const registeredAt = String(row?.registeredAt || "").trim();
+  return memberId && registeredAt ? stableImportKey([memberId, registeredAt]) : "";
+}
+function joinSurveyAnswerValues(raw) {
+  return String(raw || "")
+    .split(/\r?\n|[,、／\/;；]/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+function joinSurveyStoreCounts(rows) {
+  const counts = {};
+  for (const row of rows || []) {
+    const store = row.store || "不明";
+    counts[store] = (counts[store] || 0) + 1;
+  }
+  return Object.entries(counts).map(([store, count]) => ({ store, count })).sort((a, b) => a.store.localeCompare(b.store, "ja"));
+}
+function joinSurveyCodeSummary(rawRows) {
+  const counts = {};
+  for (const row of rawRows || []) {
+    const code = String(rowValue(row, ["コード", "code", "surveyCode"]) || "").trim();
+    if (!code) continue;
+    counts[code] = (counts[code] || 0) + 1;
+  }
+  const values = Object.entries(counts).map(([code, count]) => ({ code, count }));
+  return {
+    uniqueCount: values.length,
+    sampleValues: values.slice(0, 5),
+    likelyAnswerId: values.length > 0 && values.length === (rawRows || []).length,
+  };
+}
+function parseJoinSurveyRows(rawRows, filename = "") {
+  const map = new Map();
+  let skipped = 0;
+  let duplicateCount = 0;
+  const codeSummary = joinSurveyCodeSummary(rawRows);
+  for (const row of rawRows || []) {
+    const registeredAt = String(rowValue(row, ["登録日時", "回答日時", "送信日時", "registeredAt"]) || "").trim();
+    const memberId = normalizeMemberId(rowValue(row, ["メンバー_ID", "メンバーID", "メンバー ID", "memberId", "member_id"]));
+    if (!registeredAt || !memberId) {
+      skipped += 1;
+      continue;
+    }
+    const registeredDate = parseFlexibleDate(registeredAt);
+    const storeCode = String(rowValue(row, ["店舗コード", "店舗 コード", "storeCode", "store_code"]) || "").trim();
+    const age = Number(rowValue(row, ["メンバー_年齢", "年齢"])) || null;
+    const record = {
+      registeredAt,
+      registeredDate,
+      registeredMonth: monthOfIsoDate(registeredDate),
+      surveyCode: String(rowValue(row, ["コード", "code", "surveyCode"]) || "").trim(),
+      memberId,
+      name: String(rowValue(row, ["メンバー_氏名", "メンバー氏名", "氏名", "名前"]) || "").trim(),
+      gender: String(rowValue(row, ["メンバー_性別", "性別"]) || "").trim(),
+      age,
+      ageGroup: ageBandOf(age),
+      storeCode,
+      store: joinSurveyStoreFromCode(storeCode),
+      occupation: String(rowValue(row, ["職業"]) || "").trim(),
+      firstKnownTiming: String(rowValue(row, ["4H fitnessを初めて知った時期", "初めて知った時期"]) || "").trim(),
+      awarenessSource: joinSurveyAnswerValues(rowValue(row, ["どこで知ったか", "4H fitnessをどこで知ったか"])),
+      reservationReferenceInfo: joinSurveyAnswerValues(rowValue(row, ["体験予約時に参考にした情報"])),
+      reservationReferenceContent: String(rowValue(row, ["体験予約時に参考にした内容"]) || "").trim(),
+      lineAwareness: String(rowValue(row, ["公式LINE認知", "公式LINEを知っていたか"]) || "").trim(),
+      pastGymExperience: String(rowValue(row, ["過去ジム経験", "過去のジム経験"]) || "").trim(),
+      joinReasons: joinSurveyAnswerValues(rowValue(row, ["入会を決めた理由", "入会理由"])),
+    };
+    const key = joinSurveyDedupKey(record);
+    if (!key) {
+      skipped += 1;
+      continue;
+    }
+    if (map.has(key)) duplicateCount += 1;
+    map.set(key, record);
+  }
+  const rows = [...map.values()];
+  return {
+    rows,
+    skipped,
+    codeSummary,
+    meta: {
+      lastImportedAt: new Date().toISOString(),
+      lastFileName: filename || "貼り付け入力",
+      rowCount: rawRows?.length || 0,
+      validCount: rows.length,
+      skippedCount: skipped,
+      duplicateCount,
+      storeCounts: joinSurveyStoreCounts(rows),
+    },
+  };
+}
+function mergeJoinSurveyImport(currentValue, parsed) {
+  const current = normalizeJoinSurvey(currentValue);
+  const merged = mergeRowsByStableKey(current.rows, parsed.rows || [], joinSurveyDedupKey);
+  const meta = {
+    ...(parsed.meta || emptyJoinSurvey().meta),
+    addedCount: merged.addedCount,
+    updatedCount: merged.updatedCount,
+    savedCount: merged.rows.length,
+    skippedCount: parsed.skipped || 0,
+    duplicateCount: parsed.meta?.duplicateCount || 0,
+    storeCounts: joinSurveyStoreCounts(merged.rows),
+    codeSummary: parsed.codeSummary || null,
+  };
+  return {
+    rows: merged.rows,
+    imports: [
+      ...current.imports,
+      { ...meta, importedAt: meta.lastImportedAt },
+    ],
+    meta,
+  };
+}
 function cancellationSurveyPeriodFromMode(mode, customStartYm, customEndYm, rows) {
   const today = todayParts();
   const currentYm = cancellationYm(today.year, today.month);
@@ -2149,6 +2280,7 @@ const SK = {
   budgetTargets: "budgetTargets", revenueActuals: "revenueActuals", settings: "settings",
   cancellations: "cancellations",
   cancellationSurvey: "cancellationSurvey",
+  joinSurvey: "joinSurvey",
   counselingReservations: "counseling:reservations",
   counselingMeta: "counseling:meta",
   counselingActiveMembers: "counseling:activeMembers",
@@ -2193,10 +2325,10 @@ async function ensureSeeded() {
   return true;
 }
 async function loadAllData() {
-  const [staff, trials, joins, memberMonthly, baselines, budgetTargets, revenueActuals, settings, cancellations, cancellationSurvey, counselingReservations, counselingMeta, counselingActiveMembers, counselingNewMembers, counselingCancelMembers, aiAssistantSettings] = await Promise.all([
+  const [staff, trials, joins, memberMonthly, baselines, budgetTargets, revenueActuals, settings, cancellations, cancellationSurvey, joinSurvey, counselingReservations, counselingMeta, counselingActiveMembers, counselingNewMembers, counselingCancelMembers, aiAssistantSettings] = await Promise.all([
     sGet(SK.staff), sGet(SK.trials), sGet(SK.joins), sGet(SK.memberMonthly),
     sGet(SK.baselines), sGet(SK.budgetTargets), sGet(SK.revenueActuals), sGet(SK.settings),
-    sGet(SK.cancellations), sGet(SK.cancellationSurvey), sGet(SK.counselingReservations), sGet(SK.counselingMeta), sGet(SK.counselingActiveMembers), sGet(SK.counselingNewMembers), sGet(SK.counselingCancelMembers),
+    sGet(SK.cancellations), sGet(SK.cancellationSurvey), sGet(SK.joinSurvey), sGet(SK.counselingReservations), sGet(SK.counselingMeta), sGet(SK.counselingActiveMembers), sGet(SK.counselingNewMembers), sGet(SK.counselingCancelMembers),
     sGet(SK.aiAssistantSettings),
   ]);
   return {
@@ -2210,6 +2342,7 @@ async function loadAllData() {
     settings: settings || SEED_DATA.settings,
     cancellations: cancellations || { rows: [], importedAt: null, source: null },
     cancellationSurvey: normalizeCancellationSurvey(cancellationSurvey),
+    joinSurvey: normalizeJoinSurvey(joinSurvey),
     counselingReservations: normalizeCounselingReservations(counselingReservations),
     counselingMeta: normalizeCounselingMeta(counselingMeta),
     counselingActiveMembers: counselingActiveMembers && typeof counselingActiveMembers === "object" && !Array.isArray(counselingActiveMembers)
@@ -5499,6 +5632,218 @@ function CancellationSurveyImportPanel({ data, updateData, showToast }) {
   );
 }
 
+function JoinSurveyImportPanel({ data, updateData, showToast }) {
+  const [csvText, setCsvText] = useState("");
+  const [preview, setPreview] = useState(null);
+  const [fileName, setFileName] = useState("");
+  const fileRef = useRef(null);
+  const current = normalizeJoinSurvey(data.joinSurvey);
+  const currentKeySet = useMemo(() => new Set((current.rows || []).map(joinSurveyDedupKey).filter(Boolean)), [current.rows]);
+  const storeCounts = current.meta?.storeCounts?.length ? current.meta.storeCounts : joinSurveyStoreCounts(current.rows);
+  const previewStats = useMemo(() => {
+    if (!preview) return null;
+    let added = 0;
+    let updated = 0;
+    for (const row of preview.rows || []) {
+      const key = joinSurveyDedupKey(row);
+      if (key && currentKeySet.has(key)) updated += 1;
+      else added += 1;
+    }
+    return { added, updated };
+  }, [currentKeySet, preview]);
+
+  const reset = () => {
+    setCsvText("");
+    setPreview(null);
+    setFileName("");
+    if (fileRef.current) fileRef.current.value = "";
+  };
+  const codeSummaryText = (summary) => {
+    if (!summary || !summary.uniqueCount) return "コード列: 値なし、または列未検出";
+    if (summary.likelyAnswerId) return `コード列: ${summary.uniqueCount}種類。行ごとに一意の可能性があるため、重複キーには使いません`;
+    return `コード列: ${summary.uniqueCount}種類。回答IDとしては使わず、参考情報として保存します`;
+  };
+  const doParse = useCallback((text, name = "") => {
+    const clean = String(text || "").replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    Papa.parse(clean, {
+      header: true,
+      skipEmptyLines: true,
+      complete: (res) => {
+        const rawRows = res.data || [];
+        setPreview(parseJoinSurveyRows(rawRows, name || fileName || "貼り付け入力"));
+      },
+      error: () => showToast("CSVの解析に失敗しました。", true),
+    });
+  }, [fileName, showToast]);
+  const onFile = useCallback((e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setFileName(f.name);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = ev.target.result || "";
+      setCsvText(text);
+      doParse(text, f.name);
+    };
+    reader.onerror = () => showToast("ファイルの読み込みに失敗しました。", true);
+    reader.readAsText(f, "UTF-8");
+  }, [doParse, showToast]);
+  const onParseText = useCallback(() => {
+    if (csvText.trim()) doParse(csvText, fileName || "貼り付け入力");
+  }, [csvText, doParse, fileName]);
+  const handleImport = async () => {
+    if (!preview || !preview.rows.length) {
+      showToast("保存対象の入会時アンケートデータがありません。登録日時とメンバーIDを確認してください。", true);
+      return;
+    }
+    await updateData("joinSurvey", (cur) => mergeJoinSurveyImport(cur, preview));
+    showToast(`入会時アンケート ${preview.rows.length}件を保存しました`);
+    reset();
+  };
+  const handleDeleteAll = async () => {
+    if (!window.confirm("保存済み入会時アンケートデータをすべて削除します。よろしいですか？この操作は元に戻せません。")) return;
+    await updateData("joinSurvey", () => emptyJoinSurvey());
+    showToast("保存済み入会時アンケートデータをすべて削除しました");
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div className="f4h-card" style={{ padding: 18 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+          <Upload size={16} /><div style={{ fontWeight: 700, fontSize: 14 }}>入会時アンケートCSVを取り込む</div>
+        </div>
+        <p style={{ fontSize: 12.5, color: "var(--ink-faint)", margin: "2px 0 14px", lineHeight: 1.7 }}>
+          hacomonoから出力した入会時アンケートCSVを保存します。店舗は店舗コードから判定し、重複判定はメンバーIDと登録日時で行います。
+        </p>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+          <button type="button" className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} onClick={() => fileRef.current?.click()}>
+            <Upload size={14} /> CSVファイルを選択
+          </button>
+          <input ref={fileRef} type="file" accept=".csv,text/csv" style={{ display: "none" }} onChange={onFile} />
+          <span style={{ fontSize: 12, color: "var(--ink-faint)", alignSelf: "center" }}>または下に貼り付け</span>
+        </div>
+        <textarea className="f4h-input" rows={4} placeholder="入会時アンケートCSVの内容をここに貼り付け..."
+          style={{ resize: "vertical", fontFamily: "monospace", fontSize: 12 }}
+          value={csvText} onChange={(e) => {
+            setCsvText(e.target.value);
+            setFileName("貼り付け入力");
+            setPreview(null);
+          }} />
+        <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "8px 16px" }} onClick={onParseText} disabled={!csvText.trim()}>
+            読み込む
+          </button>
+          <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} disabled={!csvText && !preview} onClick={reset}>
+            <X size={13} /> リセット
+          </button>
+        </div>
+
+        {preview && (
+          <div className="f4h-fade-in" style={{ marginTop: 18, borderTop: "1px solid var(--border-soft)", paddingTop: 16 }}>
+            <div style={{ display: "flex", gap: 14, fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 8, flexWrap: "wrap" }}>
+              <CounselingStatLine label="CSV行数" value={`${preview.meta.rowCount}件`} />
+              <CounselingStatLine label="保存対象" value={`${preview.rows.length}件`} />
+              <CounselingStatLine label="新規追加予定" value={`${previewStats?.added ?? 0}件`} />
+              <CounselingStatLine label="更新予定" value={`${previewStats?.updated ?? 0}件`} />
+              <CounselingStatLine label="取込不能行" value={`${preview.skipped}件`} />
+              <CounselingStatLine label="CSV内重複除外" value={`${preview.meta.duplicateCount || 0}件`} />
+              <span>ファイル <b>{preview.meta.lastFileName}</b></span>
+            </div>
+            <div style={{ fontSize: 12, color: "var(--ink-faint)", marginBottom: 10 }}>
+              {codeSummaryText(preview.codeSummary)}
+            </div>
+            {preview.rows.length === 0 ? (
+              <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginBottom: 10 }}>
+                <AlertTriangle size={14} /> 保存対象の入会時アンケートデータが見つかりません。登録日時とメンバーIDの列を確認してください。
+              </div>
+            ) : (
+              <>
+                <div className="scrollbar-thin" style={{ maxHeight: 240, overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8, marginBottom: 12 }}>
+                  <table className="f4h-table">
+                    <thead><tr><th>登録日時</th><th>店舗</th><th>店舗コード</th><th>メンバーID</th><th>氏名</th><th>年齢</th><th>職業</th><th>入会理由</th></tr></thead>
+                    <tbody>
+                      {preview.rows.slice(0, 50).map((r, index) => (
+                        <tr key={`${r.memberId}-${r.registeredAt}-${index}`}>
+                          <td>{r.registeredAt || "—"}</td>
+                          <td>{r.store || "不明"}</td>
+                          <td>{r.storeCode || "—"}</td>
+                          <td>{r.memberId || "—"}</td>
+                          <td style={{ textAlign: "left" }}>{r.name || "—"}</td>
+                          <td className="num">{r.age || "—"}</td>
+                          <td style={{ textAlign: "left" }}>{r.occupation || "—"}</td>
+                          <td className="num">{r.joinReasons?.length || 0}件</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "9px 18px" }} onClick={handleImport}>
+                  <Check size={15} /> 入会時アンケート {preview.rows.length}件を保存する
+                </button>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="f4h-card" style={{ padding: 18 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+          <div style={{ fontWeight: 700, fontSize: 14 }}>保存済み入会時アンケート</div>
+          {current.rows.length > 0 && (
+            <button type="button" className="f4h-btn f4h-btn-ghost f4h-focus" style={{ padding: "7px 12px", color: "var(--red)" }} onClick={handleDeleteAll}>
+              <Trash2 size={14} /> 入会時アンケートデータをすべて削除
+            </button>
+          )}
+        </div>
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 10 }}>
+          <CounselingStatLine label="保存済み合計" value={`${current.rows.length}件`} />
+          <CounselingStatLine label="最終取込日時" value={current.meta?.lastImportedAt ? new Date(current.meta.lastImportedAt).toLocaleString("ja-JP") : "—"} />
+          <CounselingStatLine label="直近取込ファイル名" value={current.meta?.lastFileName || "—"} />
+          <CounselingStatLine label="直近取込件数" value={`${current.meta?.validCount || 0}件`} />
+          <CounselingStatLine label="直近新規追加" value={`${current.meta?.addedCount || 0}件`} />
+          <CounselingStatLine label="直近更新" value={`${current.meta?.updatedCount || 0}件`} />
+          <CounselingStatLine label="直近取込不能行" value={`${current.meta?.skippedCount || 0}件`} />
+          <CounselingStatLine label="直近CSV内重複除外" value={`${current.meta?.duplicateCount || 0}件`} />
+        </div>
+        <div style={{ fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 12 }}>
+          <div style={{ fontWeight: 700, marginBottom: 6 }}>店舗別保存件数</div>
+          {storeCounts.length ? (
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {storeCounts.map(({ store, count }) => (
+                <span key={store} style={{ border: "1px solid var(--border-soft)", borderRadius: 999, padding: "4px 9px", background: "var(--surface)" }}>
+                  {store} {count}件
+                </span>
+              ))}
+            </div>
+          ) : (
+            <span style={{ color: "var(--ink-faint)" }}>保存済みデータはありません。</span>
+          )}
+        </div>
+        {current.rows.length > 0 && (
+          <div className="scrollbar-thin" style={{ maxHeight: 260, overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8 }}>
+            <table className="f4h-table">
+              <thead><tr><th>登録日時</th><th>店舗</th><th>店舗コード</th><th>メンバーID</th><th>氏名</th><th>年齢</th><th>入会理由</th></tr></thead>
+              <tbody>
+                {current.rows.slice(0, 80).map((r, index) => (
+                  <tr key={`${r.memberId}-${r.registeredAt}-${index}`}>
+                    <td>{r.registeredAt || "—"}</td>
+                    <td>{r.store || "不明"}</td>
+                    <td>{r.storeCode || "—"}</td>
+                    <td>{r.memberId || "—"}</td>
+                    <td style={{ textAlign: "left" }}>{r.name || "—"}</td>
+                    <td className="num">{r.age || "—"}</td>
+                    <td className="num">{r.joinReasons?.length || 0}件</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function MonthlyActualsPanel({ data, updateData, showToast }) {
   const today = useMemo(() => todayParts(), []);
   const [store, setStore] = useState(STORE_DEFS[0].key);
@@ -5630,6 +5975,7 @@ function DataEntryView({ data, updateData, showToast }) {
       <SubTabs tabs={[
         { key: "trial", label: "体験者データ" },
         { key: "join", label: "入会者データ" },
+        { key: "joinSurvey", label: "入会時アンケートCSV" },
         { key: "cancellation", label: "退会者CSV" },
         { key: "cancellationSurvey", label: "退会者アンケートCSV" },
         { key: "monthly", label: "月次実績・売上" },
@@ -5637,6 +5983,7 @@ function DataEntryView({ data, updateData, showToast }) {
       ]} active={tab} onChange={setTab} />
       {tab === "trial" && <TrialImportPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "join" && <JoinImportPanel data={data} updateData={updateData} showToast={showToast} />}
+      {tab === "joinSurvey" && <JoinSurveyImportPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "cancellation" && <CancellationImportPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "cancellationSurvey" && <CancellationSurveyImportPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "monthly" && <MonthlyActualsPanel data={data} updateData={updateData} showToast={showToast} />}
@@ -8086,6 +8433,7 @@ export default function App() {
     ...SEED_DATA,
     cancellations: { rows: [], importedAt: null, source: null },
     cancellationSurvey: emptyCancellationSurvey(),
+    joinSurvey: emptyJoinSurvey(),
     counselingReservations: [],
     counselingMeta: normalizeCounselingMeta(null),
     counselingActiveMembers: [],
@@ -8140,6 +8488,7 @@ export default function App() {
       budgetTargets: [], revenueActuals: [], settings: SEED_DATA.settings,
       cancellations: { rows: [], importedAt: null, source: null },
       cancellationSurvey: emptyCancellationSurvey(),
+      joinSurvey: emptyJoinSurvey(),
       counselingReservations: [],
       counselingMeta: normalizeCounselingMeta(null),
       counselingActiveMembers: [],
