@@ -1699,8 +1699,8 @@ function normalizeCancellationSurvey(value) {
 }
 function cancellationSurveyStoreFromCode(codeRaw) {
   const code = String(codeRaw || "").trim().toUpperCase();
-  if (code === "S0001") return "梅ヶ丘";
-  if (code === "S0002") return "狛江";
+  if (code.includes("S0001") || code.includes("梅ヶ丘")) return "梅ヶ丘";
+  if (code.includes("S0002") || code.includes("狛江")) return "狛江";
   return "不明";
 }
 function cancellationSurveyAgeBand(age) {
@@ -3048,7 +3048,6 @@ function CancellationSurveyAnalysisView({ data }) {
   const environmentRanking = useMemo(() => cancellationSurveyReasonRanking(filteredRows, CANCELLATION_SURVEY_ENVIRONMENT_REASONS, "environmentReasons"), [filteredRows]);
   const serviceRanking = useMemo(() => cancellationSurveyReasonRanking(filteredRows, CANCELLATION_SURVEY_SERVICE_REASONS, "serviceReasons"), [filteredRows]);
   const freeTextRows = filteredRows.filter((row) => row.freeText || row.detailText);
-  const permittedRows = filteredRows.filter((row) => cancellationSurveyMailAllowed(row.mailPermission));
   const periodTabs = [
     { key: "all", label: "全期間" },
     { key: "current", label: "当月" },
@@ -3116,7 +3115,6 @@ function CancellationSurveyAnalysisView({ data }) {
         <CancellationSurveyKpiCard label="環境要因回答数" value={`${num(envRespondents)}人`} sub="1つ以上選択" />
         <CancellationSurveyKpiCard label="サービス要因回答数" value={`${num(serviceRespondents)}人`} sub="1つ以上選択" />
         <CancellationSurveyKpiCard label="自由記述あり" value={`${num(freeTextRows.length)}人`} sub="自由記述または詳細記述" />
-        <CancellationSurveyKpiCard label="再アプローチ許可数" value={`${num(permittedRows.length)}人`} sub="メール案内許可" />
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 12 }}>
@@ -3127,7 +3125,6 @@ function CancellationSurveyAnalysisView({ data }) {
       <CancellationSurveyStoreComparison rows={periodRows} />
       <CancellationSurveyAgeReasonTable rows={storeRows} />
       <CancellationSurveyTextTable title="自由記述一覧" rows={freeTextRows} />
-      <CancellationSurveyTextTable title="再アプローチ許可者リスト" rows={permittedRows} permission />
     </div>
   );
 }
