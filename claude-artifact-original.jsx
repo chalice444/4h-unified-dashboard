@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, Legend, ReferenceLine, AreaChart, Area,
+  ResponsiveContainer, Legend, ReferenceLine, AreaChart, Area, PieChart, Pie, Cell,
 } from "recharts";
 import {
   LayoutDashboard, Upload, Settings as SettingsIcon, TrendingUp, TrendingDown,
@@ -3227,6 +3227,74 @@ function CancellationAnalysisView({ data }) {
       </div>
     );
   };
+  const donutColors = ["#7A5285", "#3A5A78", "#5D8A72", "#C08A4B", "#7B8794", "#B85C72", "#8C6A9E", "#4D7C8A"];
+  const donutPanelStyle = {
+    border: "1px solid var(--border-soft)",
+    borderRadius: 8,
+    padding: 12,
+    minWidth: 0,
+    background: "rgba(255,255,255,.45)",
+  };
+  const buildDonutItems = (sourceRows, key) => sourceRows.map((row, idx) => ({
+    label: row.label,
+    value: Number(row[key] || 0),
+    color: donutColors[idx % donutColors.length],
+  })).filter((item) => item.value > 0);
+  const DonutCard = ({ title, rows: chartRows, denominator }) => {
+    const total = chartRows.reduce((sum, item) => sum + item.value, 0);
+    return (
+      <div style={donutPanelStyle}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "baseline", marginBottom: 8 }}>
+          <div style={{ fontWeight: 800, fontSize: 12.5, color: "var(--ink-soft)" }}>{title}</div>
+          <div className="num" style={{ fontSize: 12, color: "var(--ink-faint)", fontWeight: 800 }}>{num(total)}人</div>
+        </div>
+        {total > 0 ? (
+          <div style={{ display: "grid", gridTemplateColumns: "minmax(130px, 170px) minmax(150px, 1fr)", gap: 12, alignItems: "center" }}>
+            <div style={{ width: "100%", height: 152 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie data={chartRows} dataKey="value" nameKey="label" innerRadius="58%" outerRadius="88%" paddingAngle={2} stroke="var(--bg)" strokeWidth={2}>
+                    {chartRows.map((entry) => <Cell key={entry.label} fill={entry.color} />)}
+                  </Pie>
+                  <Tooltip formatter={(value, name) => [`${num(value)}人`, name]} />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+            <div style={{ display: "grid", gap: 6 }}>
+              {chartRows.map((item) => (
+                <div key={item.label} style={{ display: "grid", gridTemplateColumns: "10px minmax(0, 1fr) auto", gap: 7, alignItems: "center", fontSize: 11.5, lineHeight: 1.25 }}>
+                  <span style={{ width: 9, height: 9, borderRadius: 99, background: item.color }} />
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 700 }}>{item.label}</span>
+                  <span className="num" style={{ color: "var(--ink-soft)", fontWeight: 800 }}>
+                    {num(item.value)}人 / {denominator ? pct1(item.value / denominator) : "—"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div style={{ minHeight: 152, display: "grid", placeItems: "center", color: "var(--ink-faint)", fontSize: 12 }}>
+            表示できるデータがありません。
+          </div>
+        )}
+      </div>
+    );
+  };
+  const DonutGroup = ({ title, sourceRows }) => (
+    <div style={{ display: "grid", gap: 10, marginBottom: 14 }}>
+      <div style={{ fontWeight: 800, fontSize: 13, color: "var(--ink-soft)" }}>{title}</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12 }}>
+        {columns.map((col) => (
+          <DonutCard
+            key={col.key}
+            title={col.label}
+            rows={buildDonutItems(sourceRows, col.key)}
+            denominator={selectedCounts[col.key]}
+          />
+        ))}
+      </div>
+    </div>
+  );
   const KpiBox = ({ label, value, sub, children }) => (
     <div className="f4h-card" style={{ padding: 14, display: "grid", gap: 7, minWidth: 0 }}>
       <div style={{ fontSize: 11.5, color: "var(--ink-soft)", fontWeight: 800 }}>{label}</div>
@@ -3467,6 +3535,7 @@ function CancellationAnalysisView({ data }) {
             対象月に在籍期間を計算できる退会データはありません。
           </div>
         )}
+        <DonutGroup title="在籍期間構成グラフ" sourceRows={tenureAnalysis.bands} />
         <table className="f4h-table" style={{ fontSize: 12.5 }}>
           <thead>
             <tr>
@@ -3546,6 +3615,8 @@ function CancellationAnalysisView({ data }) {
 
       <div>
         <div style={sectionTitleStyle}>属性別退会者構成（{periodSummaryLabel}・{storeFilterLabel}）</div>
+        <DonutGroup title="年齢層別退会者構成グラフ" sourceRows={attributeBreakdown.ageRows} />
+        <DonutGroup title="性別別退会者構成グラフ" sourceRows={attributeBreakdown.genderRows} />
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 12 }}>
           <div className="f4h-card scrollbar-thin" style={denseCardStyle}>
             <div style={{ fontWeight: 800, fontSize: 13, color: "var(--ink-soft)", marginBottom: 8 }}>年齢層別退会者構成</div>
