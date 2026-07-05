@@ -3151,6 +3151,12 @@ function CancellationAnalysisView({ data }) {
   const [customStartYm, setCustomStartYm] = useState(latestYm);
   const [customEndYm, setCustomEndYm] = useState(latestYm);
   const [storeFilter, setStoreFilter] = useState("all");
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailMemberIdQuery, setDetailMemberIdQuery] = useState("");
+  const [detailNameQuery, setDetailNameQuery] = useState("");
+  const [detailStoreFilter, setDetailStoreFilter] = useState("all");
+  const [detailBandFilter, setDetailBandFilter] = useState("all");
+  const [detailBandChangedOnly, setDetailBandChangedOnly] = useState(false);
 
   useEffect(() => {
     setCustomStartYm((v) => v || latestYm);
@@ -3245,6 +3251,45 @@ function CancellationAnalysisView({ data }) {
   const endParts = customEndYm.split("-").map(Number);
   const periodSummaryLabel = period.mode === "all" ? "全期間" : period.label;
   const isSinglePeriodMonth = period.months.length === 1;
+  const detailBandOptions = ["3ヶ月以内", "4〜6ヶ月", "7〜12ヶ月", "13ヶ月以上"];
+  const detailRows = useMemo(() => {
+    const memberQuery = detailMemberIdQuery.trim().toLowerCase();
+    const nameQuery = detailNameQuery.trim().toLowerCase();
+    return selectedRows
+      .map((row) => {
+        const oldTenureMonths = row?.planContractDate && row?.planEndDate
+          ? monthsBetween(row.planContractDate, row.planEndDate)
+          : null;
+        const newTenureMonths = cancellationTenureMonths(row);
+        const oldTenureBand = tenureBandOf(oldTenureMonths);
+        const newTenureBand = cancellationTenureBand(row);
+        const diffMonths = oldTenureMonths != null && newTenureMonths != null
+          ? newTenureMonths - oldTenureMonths
+          : null;
+        return {
+          ...row,
+          oldTenureMonths,
+          newTenureMonths,
+          diffMonths,
+          oldTenureBand,
+          newTenureBand,
+          tenureBandChanged: !!oldTenureBand && !!newTenureBand && oldTenureBand !== newTenureBand,
+        };
+      })
+      .filter((row) => {
+        if (memberQuery && !String(row.memberId || "").toLowerCase().includes(memberQuery)) return false;
+        if (nameQuery && !String(row.name || "").toLowerCase().includes(nameQuery)) return false;
+        if (detailStoreFilter !== "all" && matchStoreName(row.store || "") !== detailStoreFilter) return false;
+        if (detailBandFilter !== "all" && row.newTenureBand !== detailBandFilter) return false;
+        if (detailBandChangedOnly && !row.tenureBandChanged) return false;
+        return true;
+      })
+      .sort((a, b) => (
+        String(b.planEndDate || "").localeCompare(String(a.planEndDate || "")) ||
+        String(a.memberId || "").localeCompare(String(b.memberId || ""))
+      ));
+  }, [selectedRows, detailMemberIdQuery, detailNameQuery, detailStoreFilter, detailBandFilter, detailBandChangedOnly]);
+  const visibleDetailRows = detailRows.slice(0, 100);
 
   if (!rows.length) {
     return (
@@ -3590,6 +3635,134 @@ function CancellationAnalysisView({ data }) {
           店舗別退会数は全店選択時のみ表示します。現在は{storeFilterLabel}のみを表示しています。
         </div>
       )}
+
+      <div className="f4h-card" style={{ padding: 0, overflow: "hidden" }}>
+        <button
+          type="button"
+          className="f4h-focus"
+          aria-expanded={detailOpen}
+          onClick={() => setDetailOpen((v) => !v)}
+          style={{
+            width: "100%",
+            border: 0,
+            background: "transparent",
+            color: "var(--ink)",
+            cursor: "pointer",
+            padding: "14px 16px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            textAlign: "left",
+          }}
+        >
+          <span style={{ display: "grid", gap: 2 }}>
+            <span style={{ fontWeight: 800, fontSize: 14 }}>退会者個別データ一覧（クリックで{detailOpen ? "閉じる" : "開く"}）</span>
+            <span style={{ fontSize: 11.5, color: "var(--ink-faint)", fontWeight: 600 }}>
+              在籍月数は保存済み値ではなく、表示時に旧ロジックと新ロジックを再計算します。
+            </span>
+          </span>
+          {detailOpen ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+        </button>
+
+        {detailOpen && (
+          <div style={{ borderTop: "1px solid var(--border-soft)", padding: 16, display: "grid", gap: 12 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 10, alignItems: "end" }}>
+              <label style={{ display: "grid", gap: 5, fontSize: 11.5, color: "var(--ink-soft)", fontWeight: 800 }}>
+                メンバーID検索
+                <input
+                  className="f4h-input"
+                  value={detailMemberIdQuery}
+                  onChange={(e) => setDetailMemberIdQuery(e.target.value)}
+                  placeholder="例: 492"
+                  style={{ fontSize: 12.5 }}
+                />
+              </label>
+              <label style={{ display: "grid", gap: 5, fontSize: 11.5, color: "var(--ink-soft)", fontWeight: 800 }}>
+                氏名検索
+                <input
+                  className="f4h-input"
+                  value={detailNameQuery}
+                  onChange={(e) => setDetailNameQuery(e.target.value)}
+                  placeholder="例: 磯邊 あき"
+                  style={{ fontSize: 12.5 }}
+                />
+              </label>
+              <label style={{ display: "grid", gap: 5, fontSize: 11.5, color: "var(--ink-soft)", fontWeight: 800 }}>
+                店舗フィルター
+                <select className="f4h-input" value={detailStoreFilter} onChange={(e) => setDetailStoreFilter(e.target.value)} style={{ fontSize: 12.5 }}>
+                  <option value="all">全店</option>
+                  {STORE_KEYS.map((s) => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </label>
+              <label style={{ display: "grid", gap: 5, fontSize: 11.5, color: "var(--ink-soft)", fontWeight: 800 }}>
+                tenureBandフィルター
+                <select className="f4h-input" value={detailBandFilter} onChange={(e) => setDetailBandFilter(e.target.value)} style={{ fontSize: 12.5 }}>
+                  <option value="all">すべて</option>
+                  {detailBandOptions.map((band) => <option key={band} value={band}>{band}</option>)}
+                </select>
+              </label>
+              <label style={{ display: "inline-flex", gap: 8, alignItems: "center", fontSize: 12, color: "var(--ink-soft)", fontWeight: 800, minHeight: 38 }}>
+                <input
+                  type="checkbox"
+                  checked={detailBandChangedOnly}
+                  onChange={(e) => setDetailBandChangedOnly(e.target.checked)}
+                />
+                tenureBand変更ありのみ
+              </label>
+            </div>
+
+            <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 12, color: "var(--ink-faint)" }}>
+              <span>表示対象 <b className="num">{num(detailRows.length)}</b>件</span>
+              {detailRows.length > visibleDetailRows.length && <span>先頭 <b className="num">{num(visibleDetailRows.length)}</b>件を表示中。検索で絞り込めます。</span>}
+              <span>対象条件 <b>{periodSummaryLabel}</b> / <b>{storeFilterLabel}</b></span>
+            </div>
+
+            <div className="scrollbar-thin" style={{ overflowX: "auto", border: "1px solid var(--border-soft)", borderRadius: 8 }}>
+              <table className="f4h-table" style={{ fontSize: 12, minWidth: 1120 }}>
+                <thead>
+                  <tr>
+                    <th>メンバーID</th>
+                    <th>氏名</th>
+                    <th>店舗</th>
+                    <th>年齢</th>
+                    <th>入会日時</th>
+                    <th>プラン契約日</th>
+                    <th>プラン契約適用終了日</th>
+                    <th>旧ロジック在籍月数</th>
+                    <th>新ロジック在籍月数</th>
+                    <th>差分月数</th>
+                    <th>新tenureBand</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleDetailRows.length === 0 ? (
+                    <tr>
+                      <td colSpan={11} style={{ textAlign: "center", color: "var(--ink-faint)", padding: 18 }}>
+                        条件に一致する退会者データはありません。
+                      </td>
+                    </tr>
+                  ) : visibleDetailRows.map((row) => (
+                    <tr key={`${row.memberId || ""}-${row.planEndDate || ""}-${row.store || ""}`}>
+                      <td className="num" style={{ fontWeight: 800 }}>{row.memberId || "—"}</td>
+                      <td style={{ textAlign: "left", fontWeight: 700 }}>{row.name || "—"}</td>
+                      <td>{matchStoreName(row.store || "") || row.store || "—"}</td>
+                      <td className="num">{row.age ?? "—"}</td>
+                      <td className="num">{row.joinDate || "—"}</td>
+                      <td className="num">{row.planContractDate || "—"}</td>
+                      <td className="num">{row.planEndDate || "—"}</td>
+                      <td className="num">{row.oldTenureMonths == null ? "算出不可" : tenureMonthText(row.oldTenureMonths)}</td>
+                      <td className="num" style={{ fontWeight: 800 }}>{row.newTenureMonths == null ? "算出不可" : tenureMonthText(row.newTenureMonths)}</td>
+                      <td className="num">{row.diffMonths == null ? "—" : signed(row.diffMonths) + "ヶ月"}</td>
+                      <td style={{ fontWeight: 800 }}>{row.newTenureBand || "算出不可"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </div>
       </>
       ) : (
         <CancellationSurveyAnalysisView data={data} />
