@@ -2087,7 +2087,7 @@ function joinSurveyCodeSummary(rawRows) {
     likelyAnswerId: values.length > 0 && values.length === (rawRows || []).length,
   };
 }
-function parseJoinSurveyRows(rawRows, filename = "") {
+function parseJoinSurveyRows(rawRows, filename = "", fallbackStore = "") {
   const map = new Map();
   let skipped = 0;
   let duplicateCount = 0;
@@ -2106,6 +2106,7 @@ function parseJoinSurveyRows(rawRows, filename = "") {
       "店舗名", "所属店舗名", "メンバー_所属店舗名", "メンバー所属店舗名",
       "所属店舗", "店舗", "storeCode", "store_code", "storeName", "store_name",
     ]) || "").trim();
+    const mappedStore = joinSurveyStoreFromCode(storeCode);
     const age = Number(rowValue(row, ["メンバー_年齢", "年齢"])) || null;
     const record = {
       registeredAt,
@@ -2118,7 +2119,7 @@ function parseJoinSurveyRows(rawRows, filename = "") {
       age,
       ageGroup: ageBandOf(age),
       storeCode,
-      store: joinSurveyStoreFromCode(storeCode) !== "不明" ? joinSurveyStoreFromCode(storeCode) : joinSurveyStoreFromFilename(filename),
+      store: mappedStore !== "不明" ? mappedStore : (!storeCode && fallbackStore ? fallbackStore : joinSurveyStoreFromFilename(filename)),
       occupation: String(rowValue(row, ["職業"]) || "").trim(),
       firstKnownTiming: String(rowValue(row, ["4H fitnessを初めて知った時期", "初めて知った時期"]) || "").trim(),
       awarenessSource: joinSurveyAnswerValues(rowValue(row, ["どこで知ったか", "4H fitnessをどこで知ったか"])),
@@ -2151,6 +2152,7 @@ function parseJoinSurveyRows(rawRows, filename = "") {
       storeCounts: joinSurveyStoreCounts(rows),
       storeCodeCounts: joinSurveyStoreCodeCounts(rows),
       unknownStoreCodeCounts: joinSurveyUnknownStoreCodeCounts(rows),
+      fallbackStore,
     },
   };
 }
@@ -5665,6 +5667,7 @@ function JoinSurveyImportPanel({ data, updateData, showToast }) {
   const [csvText, setCsvText] = useState("");
   const [preview, setPreview] = useState(null);
   const [fileName, setFileName] = useState("");
+  const [fallbackStore, setFallbackStore] = useState("");
   const fileRef = useRef(null);
   const current = normalizeJoinSurvey(data.joinSurvey);
   const currentKeySet = useMemo(() => new Set((current.rows || []).map(joinSurveyDedupKey).filter(Boolean)), [current.rows]);
@@ -5685,6 +5688,7 @@ function JoinSurveyImportPanel({ data, updateData, showToast }) {
     setCsvText("");
     setPreview(null);
     setFileName("");
+    setFallbackStore("");
     if (fileRef.current) fileRef.current.value = "";
   };
   const codeSummaryText = (summary) => {
@@ -5704,11 +5708,11 @@ function JoinSurveyImportPanel({ data, updateData, showToast }) {
       skipEmptyLines: true,
       complete: (res) => {
         const rawRows = res.data || [];
-        setPreview(parseJoinSurveyRows(rawRows, name || fileName || "貼り付け入力"));
+        setPreview(parseJoinSurveyRows(rawRows, name || fileName || "貼り付け入力", fallbackStore));
       },
       error: () => showToast("CSVの解析に失敗しました。", true),
     });
-  }, [fileName, showToast]);
+  }, [fallbackStore, fileName, showToast]);
   const onFile = useCallback((e) => {
     const f = e.target.files?.[0];
     if (!f) return;
@@ -5771,6 +5775,15 @@ function JoinSurveyImportPanel({ data, updateData, showToast }) {
             <X size={13} /> リセット
           </button>
         </div>
+        <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 12.5, color: "var(--ink-soft)" }}>
+          <span style={{ fontWeight: 700 }}>店舗コード空欄時の補完</span>
+          <select className="f4h-input" value={fallbackStore} onChange={(e) => { setFallbackStore(e.target.value); setPreview(null); }} style={{ width: 180, padding: "7px 10px" }}>
+            <option value="">補完しない</option>
+            <option value="梅ヶ丘">梅ヶ丘</option>
+            <option value="狛江">狛江</option>
+          </select>
+          <span style={{ color: "var(--ink-faint)" }}>店舗コードが読めない行だけに使います</span>
+        </div>
 
         {preview && (
           <div className="f4h-fade-in" style={{ marginTop: 18, borderTop: "1px solid var(--border-soft)", paddingTop: 16 }}>
@@ -5781,6 +5794,7 @@ function JoinSurveyImportPanel({ data, updateData, showToast }) {
               <CounselingStatLine label="更新予定" value={`${previewStats?.updated ?? 0}件`} />
               <CounselingStatLine label="取込不能行" value={`${preview.skipped}件`} />
               <CounselingStatLine label="CSV内重複除外" value={`${preview.meta.duplicateCount || 0}件`} />
+              <CounselingStatLine label="空欄時補完" value={preview.meta.fallbackStore || "なし"} />
               <span>ファイル <b>{preview.meta.lastFileName}</b></span>
             </div>
             <div style={{ fontSize: 12, color: "var(--ink-faint)", marginBottom: 10 }}>
