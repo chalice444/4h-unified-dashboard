@@ -2101,10 +2101,47 @@ const AI_ASSISTANT_RESOURCE_FIELDS = [
   ["cannotDoThisMonth", "今月できないこと"],
   ["memo", "メモ"],
 ];
-const AI_ASSISTANT_MODE_TEMPLATES = {
+const AI_ASSISTANT_MODE_ROLE_INSTRUCTIONS = {
   A: "あなたは4H fitnessの退会抑止施策を検証する分析アシスタントです。添付の集計データだけを根拠に、実行可能な施策案を優先順位付きで提案してください。",
   B: "あなたは4H fitnessの退会抑止施策を検証するレビュアーです。貼り付けられた外部レポートを、添付の集計データと店舗制約に照らして検証してください。",
 };
+const AI_ASSISTANT_MODE_TEMPLATES = {
+  A: [
+    "1. やらない方がいい施策",
+    "2. 数値根拠が弱い仮説",
+    "3. 現場リソース上、実行困難な施策",
+    "4. 今のデータから見える確度の高い傾向",
+    "5. 実行してよい施策候補",
+    "6. 必要工数",
+    "7. 想定インパクト",
+    "8. 検証KPI",
+    "9. 次回データ更新までにやること",
+  ].join("\n"),
+  B: [
+    "1. 採用してよい主張",
+    "2. 保留すべき主張",
+    "3. 却下すべき主張",
+    "4. 数字に合っているが解釈が弱い主張",
+    "5. 数値根拠が弱い仮説",
+    "6. 現場リソースを無視している施策",
+    "7. 追加検証が必要な主張",
+    "8. 代替案",
+    "9. 必要工数",
+    "10. 想定インパクト",
+    "11. 検証KPI",
+    "12. 次に確認すべきAI指示",
+  ].join("\n"),
+};
+function normalizeAiAssistantTemplate(modeKey, value) {
+  const text = String(value || "").trim();
+  const englishRole = modeKey === "B"
+    ? "AI assistant report validation mode."
+    : "AI assistant action planning mode.";
+  if (!text || text === AI_ASSISTANT_MODE_ROLE_INSTRUCTIONS[modeKey] || text === englishRole) {
+    return AI_ASSISTANT_MODE_TEMPLATES[modeKey];
+  }
+  return text;
+}
 function defaultAiAssistantSettings() {
   return {
     stores: Object.fromEntries(STORE_KEYS.map((store) => [store, {
@@ -2141,7 +2178,10 @@ function normalizeAiAssistantSettings(value) {
     stores,
     monthlyResource: { ...base.monthlyResource, ...(src.monthlyResource || {}) },
     ngConditions: Object.fromEntries(AI_NG_CONDITIONS.map((item) => [item.id, src.ngConditions?.[item.id] ?? base.ngConditions[item.id]])),
-    templates: { ...base.templates, ...(src.templates || {}) },
+    templates: {
+      A: normalizeAiAssistantTemplate("A", src.templates?.A ?? base.templates.A),
+      B: normalizeAiAssistantTemplate("B", src.templates?.B ?? base.templates.B),
+    },
   };
 }
 function aiPct(count, total) {
@@ -2263,9 +2303,7 @@ function buildAiAssistantPrompt({ mode, data, settings, activeNgIds, externalRep
     ? "外部レポートの主張を、下記の安全な集計データと店舗制約に照らして検証してください。妥当な点、根拠不足、修正すべき施策、追加で必要なデータを分けて出してください。"
     : "下記の安全な集計データと店舗制約だけを使い、退会抑止の施策候補を優先順位付きで提案してください。";
   const outputTemplate = String(normalized.templates[modeKey] || AI_ASSISTANT_MODE_TEMPLATES[modeKey] || "").trim();
-  const roleInstruction = modeKey === "B"
-    ? "AI assistant report validation mode."
-    : "AI assistant action planning mode.";
+  const roleInstruction = AI_ASSISTANT_MODE_ROLE_INSTRUCTIONS[modeKey];
   return [
     roleInstruction,
     "",
