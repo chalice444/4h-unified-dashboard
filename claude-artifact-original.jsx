@@ -2049,10 +2049,46 @@ function joinSurveyDedupKey(row) {
   return memberId && registeredAt ? stableImportKey([memberId, registeredAt]) : "";
 }
 function joinSurveyAnswerValues(raw) {
-  return String(raw || "")
-    .split(/\r?\n|[,、／\/;；]/)
-    .map((value) => value.trim())
-    .filter(Boolean);
+  const source = Array.isArray(raw) ? raw : String(raw || "").split(/\r?\n|[,、／\/;；]/);
+  return [...new Set(source
+    .map((value) => String(value || "").trim())
+    .filter(Boolean))];
+}
+function normalizeJoinSurveyColumnText(value) {
+  return String(value || "").normalize("NFKC").replace(/[\s　]/g, "");
+}
+function joinSurveySingleAnswerValues(row, names) {
+  const keys = Object.keys(row || {});
+  const exactKey = keys.find((key) => names.some((name) => String(key).trim() === name));
+  const fallbackKey = exactKey || keys.find((key) => {
+    if (String(key).includes("_")) return false;
+    const normalizedKey = normalizeJoinSurveyColumnText(key);
+    return names.some((name) => normalizedKey.includes(normalizeJoinSurveyColumnText(name)));
+  });
+  return fallbackKey ? joinSurveyAnswerValues(row[fallbackKey]) : [];
+}
+function joinSurveyMultiColumnAnswerValues(row, matchers) {
+  const values = [];
+  for (const [key, rawValue] of Object.entries(row || {})) {
+    const keyText = String(key || "");
+    const splitIndex = keyText.lastIndexOf("_");
+    if (splitIndex < 0) continue;
+    const normalizedKey = normalizeJoinSurveyColumnText(keyText);
+    if (!matchers.some((matcher) => normalizedKey.includes(normalizeJoinSurveyColumnText(matcher)))) continue;
+    const option = keyText.slice(splitIndex + 1).trim();
+    if (!option) continue;
+    const hasAnswer = Array.isArray(rawValue)
+      ? rawValue.some((value) => String(value || "").trim())
+      : String(rawValue || "").trim();
+    if (hasAnswer) values.push(option);
+  }
+  return [...new Set(values)];
+}
+function joinSurveyCombinedAnswerValues(row, singleNames, multiMatchers) {
+  return [...new Set([
+    ...joinSurveySingleAnswerValues(row, singleNames),
+    ...joinSurveyMultiColumnAnswerValues(row, multiMatchers),
+  ])];
 }
 function joinSurveyStoreCounts(rows) {
   const counts = {};
@@ -2123,11 +2159,23 @@ function parseJoinSurveyRows(rawRows, filename = "", fallbackStore = "") {
       occupation: String(rowValue(row, ["職業"]) || "").trim(),
       firstKnownTiming: String(rowValue(row, ["4H fitnessを初めて知った時期", "初めて知った時期"]) || "").trim(),
       awarenessSource: joinSurveyAnswerValues(rowValue(row, ["どこで知ったか", "4H fitnessをどこで知ったか"])),
-      reservationReferenceInfo: joinSurveyAnswerValues(rowValue(row, ["体験予約時に参考にした情報"])),
-      reservationReferenceContent: String(rowValue(row, ["体験予約時に参考にした内容"]) || "").trim(),
+      reservationReferenceInfo: joinSurveyCombinedAnswerValues(
+        row,
+        ["体験予約時に参考にした情報"],
+        ["参考にした情報は主にどこで入手", "どこで入手"],
+      ),
+      reservationReferenceContent: joinSurveyCombinedAnswerValues(
+        row,
+        ["体験予約時に参考にした内容"],
+        ["参考にした情報は主に何ですか", "主に何ですか"],
+      ),
       lineAwareness: String(rowValue(row, ["公式LINE認知", "公式LINEを知っていたか"]) || "").trim(),
       pastGymExperience: String(rowValue(row, ["過去ジム経験", "過去のジム経験"]) || "").trim(),
-      joinReasons: joinSurveyAnswerValues(rowValue(row, ["入会を決めた理由", "入会理由"])),
+      joinReasons: joinSurveyCombinedAnswerValues(
+        row,
+        ["入会を決めた理由", "入会理由"],
+        ["入会を決めた理由", "ご入会を決めた理由"],
+      ),
     };
     const key = joinSurveyDedupKey(record);
     if (!key) {
