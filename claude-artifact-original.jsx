@@ -5788,11 +5788,11 @@ function JoinImportPanel({ data, updateData, showToast }) {
         counselingWarning = counselingImport.warnings?.join(" ") || "";
       } else {
         counselingFailed = true;
-        counselingWarning = "カウンセリング分析用新規入会者データの保存対象が見つかりませんでした。";
+        counselingWarning = "新規入会者母集団（カウンセリング進捗用）の保存対象が見つかりませんでした。";
       }
     } catch (error) {
       counselingFailed = true;
-      counselingWarning = "カウンセリング分析用新規入会者データの反映に失敗しました。";
+      counselingWarning = "新規入会者母集団（カウンセリング進捗用）の反映に失敗しました。";
       console.warn("[join import] counseling new members sync failed", error);
     }
     if (counselingWarning) {
@@ -5802,7 +5802,7 @@ function JoinImportPanel({ data, updateData, showToast }) {
       setCounselingSyncWarning("");
     }
     if (counselingFailed) {
-      showToast("入会者データは保存されましたが、カウンセリング分析用新規入会者データの反映に一部失敗しました。", true);
+      showToast("入会者データは保存されましたが、新規入会者母集団（カウンセリング進捗用）の反映に一部失敗しました。", true);
     } else {
       showToast(`CVR用 ${dedup.accepted.length}件 / カウンセリング分析用 ${counselingImportableCount}件を反映しました（重複・不正スキップ${dedup.skipped}件）`);
     }
@@ -5910,7 +5910,10 @@ function JoinImportPanel({ data, updateData, showToast }) {
           <div style={{ fontWeight: 700, fontSize: 14 }}>入会者データ一覧（{data.joins.length}件）</div>
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap", fontSize: 12.5, color: "var(--ink-soft)" }}>
             <CounselingStatLine label="CVR用入会者データ" value={`${data.joins.length}件`} />
-            <CounselingStatLine label="カウンセリング分析用新規入会者データ" value={`${normalizeCounselingNewMembers(data.counselingNewMembers).length}件`} />
+            <CounselingStatLine label="新規入会者母集団（カウンセリング進捗用）" value={`${normalizeCounselingNewMembers(data.counselingNewMembers).length}件`} />
+          </div>
+          <div style={{ flexBasis: "100%", fontSize: 11.5, color: "var(--ink-faint)", lineHeight: 1.6 }}>
+            入会者CSVから作成される、カウンセリング進捗分析の分母データです。カウンセリング予約・実施履歴CSVとは別データです。
           </div>
           <input className="f4h-input" style={{ width: 150 }} placeholder="メンバーIDで検索" value={search} onChange={(e) => setSearch(e.target.value)} />
         </div>
