@@ -599,8 +599,16 @@ function isStaffPlan(row) {
     return text ? text.includes("スタッフプラン") : false;
   });
 }
+function hasExplicitBlankStore(row) {
+  if (!row || typeof row !== "object") return false;
+  const storeKeys = ["store", "storeName", "所属店舗名"];
+  const hasStoreField = storeKeys.some((key) => Object.prototype.hasOwnProperty.call(row, key));
+  if (!hasStoreField) return false;
+  const value = row.store ?? row.storeName ?? row["所属店舗名"];
+  return String(value ?? "").trim() === "";
+}
 function analysisRows(rows) {
-  return (rows || []).filter((row) => !isStaffPlan(row));
+  return (rows || []).filter((row) => !isStaffPlan(row) && !hasExplicitBlankStore(row));
 }
 function monthOfIsoDate(dateStr) {
   return dateStr ? dateStr.slice(0, 7) : null;
@@ -3096,7 +3104,7 @@ const NAV_SECTIONS = [
     items: [
       { key: "cvr", label: "CVR分析", icon: BarChart3 },
       { key: "cancellation", label: "退会分析", icon: UserMinus },
-      { key: "joinReason", label: "入会理由分析", icon: UserPlus },
+      { key: "joinReason", label: "入会分析", icon: UserPlus },
       { key: "counseling", label: "カウンセリング分析", icon: UserCog },
       { key: "marketing", label: "マーケティング分析", icon: Target },
     ],
@@ -3970,7 +3978,253 @@ function JoinReasonTopByGroupCard({ title, groups, rows, groupOf }) {
     </div>
   );
 }
-function JoinReasonAnalysisView({ data }) {
+
+function joinSummaryPlanStartDate(row) {
+  // 入会サマリーだけは、実際の利用開始月を見るため「プラン契約適用開始日」を基準にする。
+  return parseFlexibleDate(row?.planStartDate);
+}
+function joinSummaryStore(row) {
+  const store = matchStoreName(row?.store || "") || String(row?.store || "").trim();
+  return STORE_KEYS.includes(store) ? store : "unknown";
+}
+function joinSummaryAgeGroup(row) {
+  return joinReasonAgeGroup(row);
+}
+function joinSummaryGender(row) {
+  return joinReasonGender(row);
+}
+function joinSummaryCountRows(rows, getLabel, labels = null, limit = null) {
+  const counts = new Map();
+  for (const label of labels || []) counts.set(label, 0);
+  for (const row of rows || []) {
+    const label = getLabel(row) || "未設定";
+    counts.set(label, (counts.get(label) || 0) + 1);
+  }
+  let out = [...counts.entries()].map(([label, count]) => ({
+    label,
+    count,
+    rate: rows?.length ? count / rows.length : 0,
+  })).filter((row) => row.count > 0 || labels);
+  out.sort((a, b) => b.count - a.count || String(a.label).localeCompare(String(b.label), "ja"));
+  if (limit) out = out.slice(0, limit);
+  return out;
+}
+function joinSummaryAverage(values) {
+  const nums = values.filter((value) => Number.isFinite(value));
+  if (!nums.length) return null;
+  return nums.reduce((sum, value) => sum + value, 0) / nums.length;
+}
+function joinSummaryMedian(values) {
+  const nums = values.filter((value) => Number.isFinite(value)).sort((a, b) => a - b);
+  if (!nums.length) return null;
+  const mid = Math.floor(nums.length / 2);
+  return nums.length % 2 ? nums[mid] : (nums[mid - 1] + nums[mid]) / 2;
+}
+function joinSummaryDateDiffDays(startIso, endIso) {
+  const start = parseDate(startIso);
+  const end = parseDate(endIso);
+  if (!start || !end) return null;
+  const diff = Math.round((end.getTime() - start.getTime()) / 86400000);
+  return diff >= 0 ? diff : null;
+}
+function joinSummaryTrialDate(row) {
+  return parseFlexibleDate(row?.firstTrialLessonDate) || parseFlexibleDate(row?.trialLessonDate);
+}
+function joinSummaryTrialBucket(days) {
+  if (!Number.isFinite(days)) return "不明";
+  if (days === 0) return "当日";
+  if (days <= 3) return "1〜3日";
+  if (days <= 7) return "4〜7日";
+  if (days <= 14) return "8〜14日";
+  return "15日以上";
+}
+function joinSummaryMonthLabel(monthKey) {
+  if (!monthKey) return "不明";
+  const [year, month] = monthKey.split("-");
+  return `${year}/${Number(month)}月`;
+}
+function buildJoinSummaryMonthlyRows(rows) {
+  const map = new Map();
+  for (const row of rows || []) {
+    const planStartDate = joinSummaryPlanStartDate(row);
+    const monthKey = monthOfIsoDate(planStartDate);
+    if (!monthKey) continue;
+    if (!map.has(monthKey)) {
+      map.set(monthKey, { monthKey, month: joinSummaryMonthLabel(monthKey), all: 0, ...Object.fromEntries(STORE_KEYS.map((store) => [store, 0])), unknown: 0 });
+    }
+    const rec = map.get(monthKey);
+    const store = joinSummaryStore(row);
+    rec.all += 1;
+    rec[store] = (rec[store] || 0) + 1;
+  }
+  return [...map.values()].sort((a, b) => a.monthKey.localeCompare(b.monthKey));
+}
+function JoinSummaryView({ data }) {
+  const baseRows = useMemo(() => analysisRows(data.joins || []), [data.joins]);
+  const excludedStaffPlanCount = useMemo(() => (data.joins || []).filter(isStaffPlan).length, [data.joins]);
+  const excludedBlankStoreCount = useMemo(() => (data.joins || []).filter(hasExplicitBlankStore).length, [data.joins]);
+  const [storeFilter, setStoreFilter] = useState("all");
+  const [yearFilter, setYearFilter] = useState("all");
+  const [monthFilter, setMonthFilter] = useState("all");
+  const [ageFilter, setAgeFilter] = useState("all");
+  const [genderFilter, setGenderFilter] = useState("all");
+  const yearOptions = useMemo(() => {
+    const years = new Set(baseRows.map((row) => joinSummaryPlanStartDate(row)?.slice(0, 4)).filter(Boolean));
+    return [...years].sort((a, b) => b.localeCompare(a));
+  }, [baseRows]);
+  const filteredRows = useMemo(() => baseRows.filter((row) => {
+    const planStartDate = joinSummaryPlanStartDate(row);
+    const rowYear = planStartDate?.slice(0, 4) || "";
+    const rowMonth = planStartDate?.slice(5, 7) || "";
+    if (storeFilter !== "all" && joinSummaryStore(row) !== storeFilter) return false;
+    if (yearFilter !== "all" && rowYear !== yearFilter) return false;
+    if (monthFilter !== "all" && rowMonth !== monthFilter) return false;
+    if (ageFilter !== "all" && joinSummaryAgeGroup(row) !== ageFilter) return false;
+    if (genderFilter !== "all" && joinSummaryGender(row) !== genderFilter) return false;
+    return true;
+  }), [baseRows, storeFilter, yearFilter, monthFilter, ageFilter, genderFilter]);
+  const storeLabels = [...STORE_KEYS, "unknown"];
+  const storeLabelMap = { ...Object.fromEntries(STORE_KEYS.map((store) => [store, store])), unknown: "不明" };
+  const ageLabels = ["20代以下", "30代", "40代", "50代", "60代以上", "不明"];
+  const genderLabels = ["女性", "男性", "その他", "不明"];
+  const storeRows = joinSummaryCountRows(filteredRows, (row) => storeLabelMap[joinSummaryStore(row)], storeLabels.map((key) => storeLabelMap[key]));
+  const ageRows = joinSummaryCountRows(filteredRows, joinSummaryAgeGroup, ageLabels);
+  const genderRows = joinSummaryCountRows(filteredRows, joinSummaryGender, genderLabels);
+  const planRows = joinSummaryCountRows(filteredRows, (row) => row.planName || "未設定", null, 10);
+  const couponRows = joinSummaryCountRows(filteredRows, (row) => row.couponName || "未設定", null, 10);
+  const monthlyRows = buildJoinSummaryMonthlyRows(filteredRows);
+  const ages = filteredRows.map((row) => Number(row.age)).filter((age) => Number.isFinite(age) && age > 0);
+  const trialDays = filteredRows.map((row) => joinSummaryDateDiffDays(joinSummaryTrialDate(row), joinSummaryPlanStartDate(row))).filter((days) => Number.isFinite(days));
+  const avgAge = joinSummaryAverage(ages);
+  const medianAge = joinSummaryMedian(ages);
+  const avgTrialDays = joinSummaryAverage(trialDays);
+  const medianTrialDays = joinSummaryMedian(trialDays);
+  const trialBucketRows = joinSummaryCountRows(filteredRows, (row) => joinSummaryTrialBucket(joinSummaryDateDiffDays(joinSummaryTrialDate(row), joinSummaryPlanStartDate(row))), ["当日", "1〜3日", "4〜7日", "8〜14日", "15日以上", "不明"]);
+  const trialPresenceRows = joinSummaryCountRows(filteredRows, (row) => joinSummaryTrialDate(row) ? "体験日あり" : "体験日なし/不明", ["体験日あり", "体験日なし/不明"]);
+  const topGender = genderRows.find((row) => row.count > 0);
+  const monthOptions = Array.from({ length: 12 }, (_, index) => String(index + 1).padStart(2, "0"));
+
+  if (!baseRows.length) {
+    return (
+      <div className="f4h-card">
+        <EmptyState icon={UserPlus} title="入会CSVが未取り込みです" sub="データ入力の入会CSVから、入会サマリー用の joins データを取り込んでください。" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="f4h-fade-in" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div className="f4h-card" style={{ padding: 18, display: "grid", gap: 14 }}>
+        <div style={{ display: "grid", gap: 6 }}>
+          <div style={{ fontWeight: 850, fontSize: 16 }}>入会サマリー</div>
+          <div style={{ fontSize: 12.5, color: "var(--ink-soft)", lineHeight: 1.7 }}>
+            入会CSVの保存済み joins データのみを使い、月次推移は「プラン契約適用開始日」基準で集計します。個人名・会員IDの一覧は表示しません。
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--ink-faint)", lineHeight: 1.7 }}>
+            除外: スタッフプラン {num(excludedStaffPlanCount)}件 / 店舗空欄 {num(excludedBlankStoreCount)}件。体験から入会までの日数は、初回体験日または体験日からプラン契約適用開始日までで算出しています。
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+          <JoinReasonKpiCard label="入会者数" value={`${num(filteredRows.length)}件`} sub={`集計元 ${num(baseRows.length)}件`} tone="primary" />
+          <JoinReasonKpiCard label={STORE_KEYS[0]} value={`${num(filteredRows.filter((row) => joinSummaryStore(row) === STORE_KEYS[0]).length)}件`} sub="現在条件" />
+          <JoinReasonKpiCard label={STORE_KEYS[1]} value={`${num(filteredRows.filter((row) => joinSummaryStore(row) === STORE_KEYS[1]).length)}件`} sub="現在条件" />
+          <JoinReasonKpiCard label="最多性別" value={topGender ? `${topGender.label} ${pct1(topGender.rate)}` : "不明"} sub={topGender ? `${num(topGender.count)}件` : "該当なし"} />
+          <JoinReasonKpiCard label="平均 / 中央年齢" value={avgAge == null ? "不明" : `${Math.round(avgAge * 10) / 10}歳`} sub={medianAge == null ? "中央値 不明" : `中央値 ${Math.round(medianAge * 10) / 10}歳`} tone="soft" />
+          <JoinReasonKpiCard label="体験→入会 平均" value={avgTrialDays == null ? "不明" : `${Math.round(avgTrialDays * 10) / 10}日`} sub={medianTrialDays == null ? "中央値 不明" : `中央値 ${Math.round(medianTrialDays * 10) / 10}日`} />
+        </div>
+
+        <div style={{ borderTop: "1px solid var(--border-soft)", paddingTop: 12, display: "grid", gap: 10 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <span style={{ fontSize: 12, color: "var(--ink-faint)", fontWeight: 800, width: 58 }}>店舗</span>
+            {[{ key: "all", label: "全店" }, ...STORE_KEYS.map((store) => ({ key: store, label: store })), { key: "unknown", label: "不明" }].map((item) => <Pill key={item.key} active={storeFilter === item.key} onClick={() => setStoreFilter(item.key)}>{item.label}</Pill>)}
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <span style={{ fontSize: 12, color: "var(--ink-faint)", fontWeight: 800, width: 58 }}>年</span>
+            <Pill active={yearFilter === "all"} onClick={() => setYearFilter("all")}>全期間</Pill>
+            {yearOptions.map((year) => <Pill key={year} active={yearFilter === year} onClick={() => setYearFilter(year)}>{year}年</Pill>)}
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <span style={{ fontSize: 12, color: "var(--ink-faint)", fontWeight: 800, width: 58 }}>月</span>
+            <Pill active={monthFilter === "all"} onClick={() => setMonthFilter("all")}>全月</Pill>
+            {monthOptions.map((month) => <Pill key={month} active={monthFilter === month} onClick={() => setMonthFilter(month)}>{Number(month)}月</Pill>)}
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <span style={{ fontSize: 12, color: "var(--ink-faint)", fontWeight: 800, width: 58 }}>年齢層</span>
+            <Pill active={ageFilter === "all"} onClick={() => setAgeFilter("all")}>全体</Pill>
+            {ageLabels.map((label) => <Pill key={label} active={ageFilter === label} onClick={() => setAgeFilter(label)}>{label}</Pill>)}
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <span style={{ fontSize: 12, color: "var(--ink-faint)", fontWeight: 800, width: 58 }}>性別</span>
+            <Pill active={genderFilter === "all"} onClick={() => setGenderFilter("all")}>全体</Pill>
+            {genderLabels.map((label) => <Pill key={label} active={genderFilter === label} onClick={() => setGenderFilter(label)}>{label}</Pill>)}
+          </div>
+        </div>
+      </div>
+
+      {filteredRows.length === 0 ? (
+        <div className="f4h-card">
+          <EmptyState icon={Info} title="条件に一致する入会データがありません" sub="店舗・期間・年齢層・性別フィルターを変更してください。" />
+        </div>
+      ) : (
+        <>
+          <div className="f4h-card" style={{ padding: 17, display: "grid", gap: 12 }}>
+            <div style={{ fontWeight: 850, fontSize: 15 }}>月別入会数推移</div>
+            <div style={{ height: 280 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={monthlyRows} margin={{ top: 8, right: 16, left: 0, bottom: 4 }}>
+                  <CartesianGrid strokeDasharray="3 5" stroke="#E2E6DC" vertical={false} />
+                  <XAxis dataKey="month" tick={{ fontSize: 11 }} />
+                  <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
+                  <Tooltip formatter={(value) => `${num(value)}件`} contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid var(--border)" }} />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                  {STORE_KEYS.map((store, index) => <Bar key={store} dataKey={store} stackId="joins" fill={JOIN_REASON_COLORS[index]} radius={index === STORE_KEYS.length - 1 ? [5, 5, 0, 0] : [0, 0, 0, 0]} />)}
+                  <Bar dataKey="unknown" name="不明" stackId="joins" fill={JOIN_REASON_COLORS[5]} radius={[5, 5, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 320px), 1fr))", gap: 12 }}>
+            <JoinReasonBarCard title="店舗別入会者数" rows={storeRows} total={filteredRows.length} />
+            <JoinReasonBarCard title="年齢層別入会者数" rows={ageRows} total={filteredRows.length} />
+            <JoinReasonDonutCard title="性別別入会者構成" rows={genderRows} total={filteredRows.length} />
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 340px), 1fr))", gap: 12 }}>
+            <JoinReasonBarCard title="契約プランランキング" rows={planRows} total={filteredRows.length} />
+            <JoinReasonBarCard title="クーポンランキング" rows={couponRows} total={filteredRows.length} />
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 320px), 1fr))", gap: 12 }}>
+            <JoinReasonBarCard title="体験から入会までの日数" rows={trialBucketRows} total={filteredRows.length} note="初回体験日または体験日がない行、日付が逆転する行は不明に分類しています。" />
+            <JoinReasonDonutCard title="体験日入力状況" rows={trialPresenceRows} total={filteredRows.length} />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function JoinAnalysisView({ data }) {
+  const [analysisTab, setAnalysisTab] = useState("summary");
+  return (
+    <div className="f4h-fade-in" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <SectionHeading eyebrow="入会分析" title="入会サマリーと入会理由分析" />
+      <SubTabs
+        tabs={[
+          { key: "summary", label: "入会サマリー" },
+          { key: "reason", label: "入会理由分析" },
+        ]}
+        active={analysisTab}
+        onChange={setAnalysisTab}
+      />
+      {analysisTab === "summary" ? <JoinSummaryView data={data} /> : <JoinReasonAnalysisView data={data} embedded />}
+    </div>
+  );
+}
+
+function JoinReasonAnalysisView({ data, embedded = false }) {
   const rows = joinReasonRows(data);
   const storeCounts = joinReasonStoreCounts(rows);
   const [storeFilter, setStoreFilter] = useState("all");
@@ -3999,7 +4253,7 @@ function JoinReasonAnalysisView({ data }) {
   if (!rows.length) {
     return (
       <div className="f4h-fade-in" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-        <SectionHeading eyebrow="入会理由分析" title="入会時アンケートCSVの分析" />
+        {!embedded && <SectionHeading eyebrow="入会理由分析" title="入会時アンケートCSVの分析" />}
         <div className="f4h-card">
           <EmptyState
             icon={UserPlus}
@@ -4013,7 +4267,7 @@ function JoinReasonAnalysisView({ data }) {
 
   return (
     <div className="f4h-fade-in" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <SectionHeading eyebrow="入会理由分析" title="入会時アンケートCSVの分析" />
+      {!embedded && <SectionHeading eyebrow="入会理由分析" title="入会時アンケートCSVの分析" />}
 
       <div className="f4h-card" style={{ padding: 18, display: "grid", gap: 14 }}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 240px), 1fr))", gap: 14, alignItems: "start" }}>
@@ -8966,7 +9220,7 @@ export default function App() {
           {nav === "entry" && <DataEntryView data={data} updateData={updateData} showToast={showToast} />}
           {nav === "monthlyReport" && <MonthlyReportView data={data} />}
           {nav === "cancellation" && <CancellationAnalysisView data={data} showToast={showToast} />}
-          {nav === "joinReason" && <JoinReasonAnalysisView data={data} />}
+          {nav === "joinReason" && <JoinAnalysisView data={data} />}
           {nav === "counseling" && <CounselingAnalysisView data={data} updateData={updateData} showToast={showToast} onNavigate={setNav} />}
           {nav === "cvr" && <CvrAnalysisView data={data} />}
           {nav === "marketing" && (
