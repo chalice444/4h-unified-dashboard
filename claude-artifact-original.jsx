@@ -385,6 +385,41 @@ function joinImportKey(row) {
 function exactJoinEventDate(value) {
   return parseCounselingDate(value) || parseFlexibleDate(value);
 }
+function parseJoinAge(raw) {
+  const text = String(raw ?? "").normalize("NFKC").trim();
+  if (!text) return null;
+  const match = text.match(/\d{1,3}/);
+  if (!match) return null;
+  const age = Number(match[0]);
+  return age > 0 && age < 120 ? age : null;
+}
+function ageAtDate(birthDateStr, referenceDateStr) {
+  const birthDate = parseDate(birthDateStr);
+  const referenceDate = parseDate(referenceDateStr);
+  if (!birthDate || !referenceDate) return null;
+  if (birthDate > referenceDate) return null;
+  let age = referenceDate.getFullYear() - birthDate.getFullYear();
+  const beforeBirthday =
+    referenceDate.getMonth() < birthDate.getMonth() ||
+    (referenceDate.getMonth() === birthDate.getMonth() && referenceDate.getDate() < birthDate.getDate());
+  if (beforeBirthday) age -= 1;
+  return age > 0 && age < 120 ? age : null;
+}
+function normalizeJoinGender(raw) {
+  const value = String(raw || "").normalize("NFKC").trim();
+  if (!value) return "";
+  if (value.includes("女")) return "女性";
+  if (value.includes("男")) return "男性";
+  if (value.includes("その他")) return "その他";
+  return value;
+}
+function joinStoreRawValue(row) {
+  return String(
+    activeMemberRowValue(row, ["所属店舗名", "メンバー所属店舗名"], { exact: true }) ||
+    activeMemberRowValue(row, ["所属店舗名", "メンバー所属店舗名", "店舗名"]) ||
+    ""
+  ).trim();
+}
 function joinDeletionEventKeys(row) {
   const memberId = normalizeMemberId(row?.memberId);
   const store = matchStoreName(row?.store || "") || String(row?.store || "").trim();
@@ -426,6 +461,10 @@ function cleanJoinCsvRows(rawRows, mapping) {
     const iso = parseFlexibleDate(dateRaw);
     if (!iso) continue;
     const [y, m] = iso.split("-").map(Number);
+    const storeRaw = joinStoreRawValue(row);
+    const birthDate = parseCounselingDate(activeMemberRowValue(row, ["生年月日"])) || parseFlexibleDate(activeMemberRowValue(row, ["生年月日"]));
+    const ageFromColumn = parseJoinAge(activeMemberRowValue(row, ["年齢"]));
+    const age = ageFromColumn ?? ageAtDate(birthDate, iso);
     out.push({
       memberId,
       year: y,
@@ -434,14 +473,16 @@ function cleanJoinCsvRows(rawRows, mapping) {
       startDate: iso,
       joinDate: parseCounselingDate(activeMemberRowValue(row, ["入会日時"])),
       planContractDate: parseCounselingDate(activeMemberRowValue(row, ["プラン契約日"])),
-      store: matchStoreName(activeMemberRowValue(row, ["所属店舗名"], { exact: true })) || String(activeMemberRowValue(row, ["所属店舗名"], { exact: true }) || "").trim(),
+      store: matchStoreName(storeRaw) || "不明",
+      storeRaw,
       name: String(activeMemberRowValue(row, ["氏名", "名前", "会員名", "メンバー名"]) || "").trim(),
-      gender: String(activeMemberRowValue(row, ["性別"]) || "").trim(),
-      age: Number(activeMemberRowValue(row, ["年齢"])) || null,
+      gender: normalizeJoinGender(activeMemberRowValue(row, ["性別"])),
+      birthDate,
+      age,
       trialLessonDate: parseCounselingDate(activeMemberRowValue(row, ["無料体験会 受講日時", "無料体験会受講日時"])),
       firstTrialLessonDate: parseCounselingDate(activeMemberRowValue(row, ["トライアル 初回受講日時", "トライアル初回受講日時"])),
       planName: String(activeMemberRowValue(row, ["契約プラン名", "プラン名"]) || "").trim(),
-      planStartDate: parseCounselingDate(activeMemberRowValue(row, ["プラン契約適用開始日"])),
+      planStartDate: parseCounselingDate(activeMemberRowValue(row, ["プラン契約適用開始日"])) || iso,
       planEndDate: parseCounselingDate(activeMemberRowValue(row, ["プラン契約適用終了日"])),
       couponName: String(activeMemberRowValue(row, ["クーポン名"]) || "").trim(),
     });
@@ -601,11 +642,16 @@ function isStaffPlan(row) {
 }
 function hasExplicitBlankStore(row) {
   if (!row || typeof row !== "object") return false;
-  const storeKeys = ["store", "storeName", "所属店舗名"];
-  const hasStoreField = storeKeys.some((key) => Object.prototype.hasOwnProperty.call(row, key));
-  if (!hasStoreField) return false;
-  const value = row.store ?? row.storeName ?? row["所属店舗名"];
-  return String(value ?? "").trim() === "";
+  const hasStoreRaw = Object.prototype.hasOwnProperty.call(row, "storeRaw");
+  if (hasStoreRaw) return String(row.storeRaw ?? "").trim() === "";
+  const fallbackKeys = ["storeName", "所属店舗名"];
+  const fallbackKey = fallbackKeys.find((key) => Object.prototype.hasOwnProperty.call(row, key));
+  if (fallbackKey) return String(row[fallbackKey] ?? "").trim() === "";
+  if (Object.prototype.hasOwnProperty.call(row, "store")) {
+    const store = String(row.store ?? "").trim();
+    return store === "";
+  }
+  return false;
 }
 function analysisRows(rows) {
   return (rows || []).filter((row) => !isStaffPlan(row) && !hasExplicitBlankStore(row));
