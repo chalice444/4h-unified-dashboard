@@ -3862,11 +3862,10 @@ function JoinReasonBarCard({ title, rows, total, note, heightPerRow = 34, emphas
   const chartRows = rows.map((row, index) => ({
     ...row,
     rank: index + 1,
-    shortLabel: row.label.length > 20 ? `${row.label.slice(0, 20)}…` : row.label,
     ratePct: row.rate == null ? 0 : Math.round(row.rate * 1000) / 10,
     fill: JOIN_REASON_COLORS[index % JOIN_REASON_COLORS.length],
   }));
-  const height = Math.max(emphasis ? 250 : 190, chartRows.length * heightPerRow + 46);
+  const height = Math.max(emphasis ? 220 : 170, chartRows.length * heightPerRow + 28);
   return (
     <div className="f4h-card" style={{ padding: 17, display: "grid", gap: 12, minWidth: 0 }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
@@ -3881,7 +3880,7 @@ function JoinReasonBarCard({ title, rows, total, note, heightPerRow = 34, emphas
             <BarChart data={chartRows} layout="vertical" margin={{ top: 4, right: 18, left: 0, bottom: 4 }}>
               <CartesianGrid strokeDasharray="3 5" stroke="#E2E6DC" horizontal={false} />
               <XAxis type="number" hide domain={[0, "dataMax"]} />
-              <YAxis type="category" dataKey="shortLabel" width={emphasis ? 156 : 126} tick={{ fontSize: 11.5, fill: "var(--ink)" }} axisLine={false} tickLine={false} interval={0} />
+              <YAxis type="category" dataKey="rank" width={28} tick={{ fontSize: 11.5, fill: "var(--ink-faint)", fontWeight: 800 }} axisLine={false} tickLine={false} interval={0} />
               <Tooltip
                 formatter={(value, name, item) => [`${num(value)}件 / ${pct1(item?.payload?.rate)}`, item?.payload?.label || name]}
                 contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid var(--border)" }}
@@ -3891,11 +3890,11 @@ function JoinReasonBarCard({ title, rows, total, note, heightPerRow = 34, emphas
               </Bar>
             </BarChart>
           </ResponsiveContainer>
-          <div style={{ display: "grid", gap: 7 }}>
+          <div style={{ display: "grid", gap: 9 }}>
             {chartRows.map((row) => (
-              <div key={`${title}-list-${row.label}`} style={{ display: "grid", gridTemplateColumns: "28px minmax(0, 1fr) auto", gap: 8, alignItems: "center", fontSize: 12.5 }}>
+              <div key={`${title}-list-${row.label}`} style={{ display: "grid", gridTemplateColumns: "28px minmax(0, 1fr) auto", gap: 8, alignItems: "start", fontSize: 12.5 }}>
                 <span className="num" style={{ color: "var(--ink-faint)", fontWeight: 800 }}>{row.rank}</span>
-                <span style={{ fontWeight: 750, lineHeight: 1.35 }}>{row.label}</span>
+                <span style={{ fontWeight: 750, lineHeight: 1.45, whiteSpace: "normal", overflowWrap: "anywhere" }}>{row.label}</span>
                 <span className="num" style={{ fontWeight: 850, whiteSpace: "nowrap" }}>{num(row.count)}件 / {pct1(row.rate)}</span>
               </div>
             ))}
