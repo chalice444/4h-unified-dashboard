@@ -3875,7 +3875,7 @@ function JoinReasonBarCard({ title, rows, total, note, heightPerRow = 34, emphas
   }));
   const height = Math.max(emphasis ? 220 : 170, chartRows.length * heightPerRow + 28);
   return (
-    <div className="f4h-card" style={{ padding: 17, display: "grid", gap: 12, minWidth: 0 }}>
+    <div className="f4h-card" style={{ padding: 17, display: "grid", gap: 12, minWidth: 0, overflow: "hidden" }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
         <div style={{ fontWeight: 850, fontSize: emphasis ? 16 : 14 }}>{title}</div>
         <div style={{ fontSize: 11, color: "var(--ink-faint)" }}>対象 {num(total)}人</div>
@@ -3917,7 +3917,7 @@ function JoinReasonDonutCard({ title, rows, total }) {
   const chartRows = rows.slice(0, 8).map((row, index) => ({ ...row, value: row.count, color: JOIN_REASON_COLORS[index % JOIN_REASON_COLORS.length] }));
   const chartTotal = chartRows.reduce((sum, row) => sum + row.value, 0);
   return (
-    <div className="f4h-card" style={{ padding: 17, display: "grid", gap: 12, minWidth: 0 }}>
+    <div className="f4h-card" style={{ padding: 17, display: "grid", gap: 12, minWidth: 0, overflow: "hidden" }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
         <div style={{ fontWeight: 850, fontSize: 14 }}>{title}</div>
         <div style={{ fontSize: 11, color: "var(--ink-faint)" }}>対象 {num(total)}人</div>
@@ -4168,7 +4168,7 @@ function JoinSummaryView({ data }) {
         </div>
       ) : (
         <>
-          <div className="f4h-card" style={{ padding: 17, display: "grid", gap: 12 }}>
+          <div className="f4h-card" style={{ padding: 17, display: "grid", gap: 12, overflow: "hidden" }}>
             <div style={{ fontWeight: 850, fontSize: 15 }}>月別入会数推移</div>
             <div style={{ height: 280 }}>
               <ResponsiveContainer width="100%" height="100%">
