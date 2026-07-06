@@ -3923,7 +3923,7 @@ function JoinReasonDonutCard({ title, rows, total }) {
         <div style={{ fontSize: 11, color: "var(--ink-faint)" }}>対象 {num(total)}人</div>
       </div>
       {chartTotal > 0 ? (
-        <div style={{ display: "grid", gridTemplateColumns: "minmax(130px, 180px) minmax(0, 1fr)", gap: 14, alignItems: "center" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 150px), 1fr))", gap: 14, alignItems: "center" }}>
           <div style={{ height: 170, minWidth: 0 }}>
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
