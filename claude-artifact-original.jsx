@@ -2096,22 +2096,22 @@ function cancellationSurveyCodeSummary(rawRows) {
     likelyAnswerId: values.length > 0 && values.length === (rawRows || []).length,
   };
 }
-function cancellationSurveyImportKeyFromParts({ surveyCode, memberId, registeredAt, preferSurveyCode = false }) {
-  const code = String(surveyCode || "").trim();
-  if (preferSurveyCode && code) return `code:${code}`;
+function cancellationSurveyImportKeyFromParts({ surveyCode, memberId, registeredAt, allowCodeFallback = false }) {
   const id = normalizeMemberId(memberId);
   const registered = normalizeCancellationSurveyRegisteredAt(registeredAt);
   if (id && registered) return `member-registered:${stableImportKey([id, registered])}`;
+  const code = String(surveyCode || "").trim();
+  if (allowCodeFallback && code) return `code:${code}`;
   return "";
 }
 function cancellationSurveyDedupKey(row) {
-  if (row?.importKey) return row.importKey;
-  return cancellationSurveyImportKeyFromParts({
+  const canonicalKey = cancellationSurveyImportKeyFromParts({
     surveyCode: row?.surveyCode || rowValue(row, ["コード", "回答ID", "回答 ID", "id", "surveyCode"]),
     memberId: row?.memberId || rowValue(row, ["メンバー_ID", "メンバーID", "メンバー ID", "memberId", "member_id"]),
     registeredAt: row?.registeredAt || rowValue(row, ["登録日時", "回答日時", "送信日時", "registeredAt"]),
-    preferSurveyCode: false,
+    allowCodeFallback: false,
   });
+  return canonicalKey || row?.importKey || "";
 }
 function normalizeCancellationSurveySavedRow(row) {
   const importKey = cancellationSurveyDedupKey(row);
@@ -2138,7 +2138,7 @@ function parseCancellationSurveyRows(rawRows, filename = "") {
       surveyCode,
       memberId,
       registeredAt,
-      preferSurveyCode: codeSummary.likelyAnswerId,
+      allowCodeFallback: codeSummary.likelyAnswerId,
     });
     if (!key) {
       skipped += 1;
