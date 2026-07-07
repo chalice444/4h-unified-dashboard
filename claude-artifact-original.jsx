@@ -12,6 +12,7 @@ import {
   UserPlus, UserMinus, Percent, Info, Loader2, Copy,
 } from "lucide-react";
 import Papa from "papaparse";
+import * as XLSX from "xlsx";
 
 const MarketingApp = React.lazy(() => import("./src/marketing/MarketingArtifact.jsx"));
 const SEED_DATA = 
@@ -624,6 +625,177 @@ function rowValue(row, names) {
 }
 function normalizeMemberId(raw) {
   return raw != null ? String(raw).trim().replace(/[　\s]/g, "") : "";
+}
+function todayIsoLocal() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function normalizeMilonMemberId(raw) {
+  return raw != null ? String(raw).normalize("NFKC").trim().replace(/[\u3000\s]/g, "") : "";
+}
+function milonUserImportKey(row) {
+  const snapshotDate = String(row?.snapshotDate || "").trim();
+  const memberId = normalizeMilonMemberId(row?.memberId);
+  return snapshotDate && memberId ? stableImportKey([snapshotDate, memberId]) : "";
+}
+function emptyMilonUserSnapshots() {
+  return {
+    rows: [],
+    imports: [],
+    meta: {
+      lastImportedAt: null,
+      lastFileName: null,
+      lastSnapshotDate: null,
+      lastStore: null,
+      rowCount: 0,
+      validCount: 0,
+      blankMemberIdCount: 0,
+      duplicateMemberIdCount: 0,
+      lastLoginBlankCount: 0,
+      trLast30dUnknownCount: 0,
+      savedCount: 0,
+      addedCount: 0,
+      updatedCount: 0,
+    },
+  };
+}
+function normalizeMilonUserSnapshots(value) {
+  if (Array.isArray(value)) {
+    return { ...emptyMilonUserSnapshots(), rows: value };
+  }
+  if (value && typeof value === "object") {
+    return {
+      rows: Array.isArray(value.rows) ? value.rows : [],
+      imports: Array.isArray(value.imports) ? value.imports : [],
+      meta: { ...emptyMilonUserSnapshots().meta, ...(value.meta || {}) },
+    };
+  }
+  return emptyMilonUserSnapshots();
+}
+function milonCellText(cell) {
+  if (!cell) return "";
+  if (cell.w != null) return String(cell.w);
+  if (cell.v == null) return "";
+  if (cell.v instanceof Date) return cell.v.toISOString().slice(0, 10);
+  return String(cell.v);
+}
+function excelSerialDateToIso(value) {
+  if (typeof value !== "number" || !isFinite(value)) return null;
+  const parsed = XLSX.SSF.parse_date_code(value);
+  if (!parsed) return null;
+  return `${String(parsed.y).padStart(4, "0")}-${String(parsed.m).padStart(2, "0")}-${String(parsed.d).padStart(2, "0")}`;
+}
+function parseMilonDate(raw) {
+  if (raw == null || raw === "") return null;
+  if (raw instanceof Date && !isNaN(raw.getTime())) return raw.toISOString().slice(0, 10);
+  if (typeof raw === "number") return excelSerialDateToIso(raw);
+  return parseFlexibleDate(raw);
+}
+function parseMilonNumber(raw) {
+  const text = String(raw ?? "").normalize("NFKC").replace(/,/g, "").trim();
+  if (!text) return null;
+  const value = Number(text);
+  return Number.isFinite(value) ? value : null;
+}
+function sheetToMilonRows(sheet) {
+  const range = XLSX.utils.decode_range(sheet["!ref"] || "A1:A1");
+  const headers = [];
+  for (let c = range.s.c; c <= range.e.c; c += 1) {
+    headers.push(milonCellText(sheet[XLSX.utils.encode_cell({ r: range.s.r, c })]).trim());
+  }
+  const rows = [];
+  for (let r = range.s.r + 1; r <= range.e.r; r += 1) {
+    const row = {};
+    let hasValue = false;
+    for (let c = range.s.c; c <= range.e.c; c += 1) {
+      const header = headers[c - range.s.c] || `col${c}`;
+      const value = milonCellText(sheet[XLSX.utils.encode_cell({ r, c })]);
+      if (String(value).trim()) hasValue = true;
+      row[header] = value;
+    }
+    if (hasValue) rows.push(row);
+  }
+  return rows;
+}
+function parseMilonUserRows(rawRows, { store, snapshotDate, filename, importedAt }) {
+  const idCounts = new Map();
+  let blankMemberIdCount = 0;
+  for (const row of rawRows || []) {
+    const memberId = normalizeMilonMemberId(rowValue(row, ["ZIP"]));
+    if (!memberId) {
+      blankMemberIdCount += 1;
+      continue;
+    }
+    idCounts.set(memberId, (idCounts.get(memberId) || 0) + 1);
+  }
+  const duplicateIds = new Set([...idCounts.entries()].filter(([, count]) => count > 1).map(([id]) => id));
+  let duplicateMemberIdCount = 0;
+  let lastLoginBlankCount = 0;
+  let trLast30dUnknownCount = 0;
+  const rows = [];
+  for (const row of rawRows || []) {
+    const memberId = normalizeMilonMemberId(rowValue(row, ["ZIP"]));
+    if (!memberId) continue;
+    if (duplicateIds.has(memberId)) {
+      duplicateMemberIdCount += 1;
+      continue;
+    }
+    const lastLoginRaw = rowValue(row, ["LASTLOGIN"]);
+    const trLast30d = parseMilonNumber(rowValue(row, ["TR_LAST30D"]));
+    if (!String(lastLoginRaw ?? "").trim()) lastLoginBlankCount += 1;
+    if (trLast30d == null) trLast30dUnknownCount += 1;
+    const record = {
+      milonId: String(rowValue(row, ["ID"]) || "").trim(),
+      memberId,
+      store,
+      firstName: String(rowValue(row, ["FIRSTNAME"]) || "").trim(),
+      lastName: String(rowValue(row, ["LASTNAME"]) || "").trim(),
+      gender: String(rowValue(row, ["GENDER"]) || "").trim(),
+      lastLogin: parseMilonDate(lastLoginRaw),
+      birthday: parseMilonDate(rowValue(row, ["BIRTHDAY"])),
+      motivation: String(rowValue(row, ["MOTIVATION"]) || "").trim(),
+      trLast30d,
+      snapshotDate,
+      importedAt,
+      sourceFileName: filename || "",
+    };
+    record.importKey = milonUserImportKey(record);
+    rows.push(record);
+  }
+  return {
+    rows,
+    stats: {
+      rowCount: (rawRows || []).length,
+      validCount: rows.length,
+      blankMemberIdCount,
+      duplicateMemberIdCount,
+      lastLoginBlankCount,
+      trLast30dUnknownCount,
+    },
+  };
+}
+function mergeMilonUserSnapshots(currentValue, parsed, source) {
+  const current = normalizeMilonUserSnapshots(currentValue);
+  const merged = mergeRowsByStableKey(current.rows, parsed.rows || [], milonUserImportKey);
+  const meta = {
+    ...current.meta,
+    ...(parsed.stats || {}),
+    lastImportedAt: source.importedAt,
+    lastFileName: source.filename,
+    lastSnapshotDate: source.snapshotDate,
+    lastStore: source.store,
+    savedCount: merged.rows.length,
+    addedCount: merged.addedCount,
+    updatedCount: merged.updatedCount,
+  };
+  return {
+    rows: merged.rows,
+    imports: [
+      ...current.imports,
+      { ...meta, importedAt: source.importedAt },
+    ],
+    meta,
+  };
 }
 function normalizeStaffPlanText(value) {
   return String(value ?? "").normalize("NFKC").replace(/[　\s]/g, "").toLowerCase();
@@ -2581,6 +2753,7 @@ const SK = {
   counselingNewMembers: "counseling:newMembers",
   counselingCancelMembers: "counseling:cancelMembers",
   aiAssistantSettings: "aiAssistantSettings",
+  milonUserSnapshots: "milonUserSnapshots",
 };
 function withTimeout(promise, ms, label) {
   return new Promise((resolve, reject) => {
@@ -2619,11 +2792,11 @@ async function ensureSeeded() {
   return true;
 }
 async function loadAllData() {
-  const [staff, trials, joins, memberMonthly, baselines, budgetTargets, revenueActuals, settings, cancellations, cancellationSurvey, joinSurvey, counselingReservations, counselingMeta, counselingActiveMembers, counselingNewMembers, counselingCancelMembers, aiAssistantSettings] = await Promise.all([
+  const [staff, trials, joins, memberMonthly, baselines, budgetTargets, revenueActuals, settings, cancellations, cancellationSurvey, joinSurvey, counselingReservations, counselingMeta, counselingActiveMembers, counselingNewMembers, counselingCancelMembers, aiAssistantSettings, milonUserSnapshots] = await Promise.all([
     sGet(SK.staff), sGet(SK.trials), sGet(SK.joins), sGet(SK.memberMonthly),
     sGet(SK.baselines), sGet(SK.budgetTargets), sGet(SK.revenueActuals), sGet(SK.settings),
     sGet(SK.cancellations), sGet(SK.cancellationSurvey), sGet(SK.joinSurvey), sGet(SK.counselingReservations), sGet(SK.counselingMeta), sGet(SK.counselingActiveMembers), sGet(SK.counselingNewMembers), sGet(SK.counselingCancelMembers),
-    sGet(SK.aiAssistantSettings),
+    sGet(SK.aiAssistantSettings), sGet(SK.milonUserSnapshots),
   ]);
   return {
     staff: staff || SEED_DATA.staff,
@@ -2649,6 +2822,7 @@ async function loadAllData() {
       ? { rows: normalizeCounselingCancelMembers(counselingCancelMembers), imports: normalizeCounselingMemberImports(counselingCancelMembers), meta: normalizeCounselingCancelMembersMeta(counselingCancelMembers) }
       : normalizeCounselingCancelMembers(counselingCancelMembers),
     aiAssistantSettings: normalizeAiAssistantSettings(aiAssistantSettings),
+    milonUserSnapshots: normalizeMilonUserSnapshots(milonUserSnapshots),
   };
 }
 // read-modify-write: 同時編集での上書きリスクを下げる
@@ -6889,6 +7063,7 @@ function DataEntryView({ data, updateData, showToast }) {
         { key: "trial", label: "体験者データ" },
         { key: "join", label: "入会者データ" },
         { key: "joinSurvey", label: "入会時アンケートCSV" },
+        { key: "milon", label: "ミロンME利用サマリー" },
         { key: "cancellation", label: "退会者CSV" },
         { key: "cancellationSurvey", label: "退会者アンケートCSV" },
         { key: "monthly", label: "月次実績・売上" },
@@ -6897,10 +7072,211 @@ function DataEntryView({ data, updateData, showToast }) {
       {tab === "trial" && <TrialImportPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "join" && <JoinImportPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "joinSurvey" && <JoinSurveyImportPanel data={data} updateData={updateData} showToast={showToast} />}
+      {tab === "milon" && <MilonUserSummaryImportPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "cancellation" && <CancellationImportPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "cancellationSurvey" && <CancellationSurveyImportPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "monthly" && <MonthlyActualsPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "counseling" && <CounselingDataImportSection data={data} updateData={updateData} showToast={showToast} />}
+    </div>
+  );
+}
+
+function MilonUserSummaryImportPanel({ data, updateData, showToast }) {
+  const [store, setStore] = useState("");
+  const [snapshotDate, setSnapshotDate] = useState(todayIsoLocal());
+  const [preview, setPreview] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const fileRef = useRef(null);
+  const current = normalizeMilonUserSnapshots(data.milonUserSnapshots);
+  const rows = current.rows || [];
+  const meta = current.meta || emptyMilonUserSnapshots().meta;
+  const activeMembers = normalizeCounselingActiveMembers(data.counselingActiveMembers);
+  const activeMemberIds = useMemo(() => new Set(activeMembers.map((row) => normalizeMemberId(row.memberId)).filter(Boolean)), [activeMembers]);
+  const matchedCount = useMemo(() => rows.filter((row) => activeMemberIds.has(normalizeMemberId(row.memberId))).length, [rows, activeMemberIds]);
+  const unmatchedSamples = useMemo(() => rows
+    .filter((row) => row.memberId && !activeMemberIds.has(normalizeMemberId(row.memberId)))
+    .map((row) => row.memberId)
+    .slice(0, 10), [rows, activeMemberIds]);
+  const matchRate = rows.length && activeMemberIds.size ? matchedCount / rows.length : null;
+
+  const resetPreview = () => {
+    setPreview(null);
+    if (fileRef.current) fileRef.current.value = "";
+  };
+
+  const handleFile = useCallback(async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!store) {
+      showToast("店舗を選択してからExcelを読み込んでください。", true);
+      if (fileRef.current) fileRef.current.value = "";
+      return;
+    }
+    const normalizedSnapshotDate = parseFlexibleDate(snapshotDate) || todayIsoLocal();
+    setLoading(true);
+    try {
+      const buffer = await file.arrayBuffer();
+      const workbook = XLSX.read(buffer, { type: "array", cellDates: true, raw: true });
+      const sheetName = workbook.SheetNames.find((name) => name === "Users") || workbook.SheetNames.find((name) => String(name).toLowerCase() === "users");
+      if (!sheetName) {
+        showToast("Usersシートが見つかりません。", true);
+        resetPreview();
+        return;
+      }
+      const rawRows = sheetToMilonRows(workbook.Sheets[sheetName]);
+      const importedAt = new Date().toISOString();
+      const parsed = parseMilonUserRows(rawRows, {
+        store,
+        snapshotDate: normalizedSnapshotDate,
+        filename: file.name,
+        importedAt,
+      });
+      setSnapshotDate(normalizedSnapshotDate);
+      setPreview({
+        ...parsed,
+        filename: file.name,
+        sheetName,
+        store,
+        snapshotDate: normalizedSnapshotDate,
+        importedAt,
+      });
+    } catch (error) {
+      console.warn("[milon import] failed to parse workbook", error);
+      showToast("ミロンME利用サマリーExcelの読み込みに失敗しました。", true);
+      resetPreview();
+    } finally {
+      setLoading(false);
+    }
+  }, [store, snapshotDate, showToast]);
+
+  const handleImport = async () => {
+    if (!preview) {
+      showToast("Excelを読み込んでください。", true);
+      return;
+    }
+    if (!preview.rows.length) {
+      showToast("保存対象のミロンME利用サマリーがありません。", true);
+      return;
+    }
+    const source = {
+      filename: preview.filename,
+      store: preview.store,
+      snapshotDate: preview.snapshotDate,
+      importedAt: new Date().toISOString(),
+    };
+    const saved = await updateData("milonUserSnapshots", (cur) => mergeMilonUserSnapshots(cur, {
+      rows: preview.rows.map((row) => ({ ...row, importedAt: source.importedAt })),
+      stats: preview.stats,
+    }, source));
+    const savedMeta = normalizeMilonUserSnapshots(saved).meta;
+    showToast(`ミロンME利用サマリー ${preview.rows.length}件を保存しました（保存済み ${savedMeta.savedCount}件）`);
+    resetPreview();
+  };
+
+  return (
+    <div className="f4h-fade-in" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div className="f4h-card" style={{ padding: 18 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+          <Upload size={16} /><div style={{ fontWeight: 700, fontSize: 14 }}>ミロンME利用サマリーExcelを取り込む</div>
+        </div>
+        <p style={{ fontSize: 12.5, color: "var(--ink-faint)", margin: "2px 0 14px", lineHeight: 1.7 }}>
+          ミロンMEから出力した会員ごとの利用サマリーExcelを保存します。来店履歴明細ではなく、最終利用日と直近30日利用回数のスナップショットです。
+        </p>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: 12 }}>
+          <label style={{ display: "grid", gap: 5, fontSize: 12.5, color: "var(--ink-soft)", fontWeight: 700 }}>
+            対象店舗
+            <select className="f4h-input" value={store} onChange={(e) => { setStore(e.target.value); resetPreview(); }}>
+              <option value="">選択してください</option>
+              {STORE_KEYS.map((key) => <option key={key} value={key}>{key}</option>)}
+            </select>
+          </label>
+          <label style={{ display: "grid", gap: 5, fontSize: 12.5, color: "var(--ink-soft)", fontWeight: 700 }}>
+            データ基準日
+            <input className="f4h-input" type="date" value={snapshotDate} onChange={(e) => { setSnapshotDate(e.target.value || todayIsoLocal()); resetPreview(); }} />
+          </label>
+        </div>
+        <p style={{ fontSize: 11.8, color: "var(--ink-faint)", margin: "0 0 12px", lineHeight: 1.6 }}>
+          ミロンMEでExcelを出力した日、またはTR_LAST30Dの基準日を選択してください。未指定の場合は本日を基準日として保存します。
+        </p>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+          <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} onClick={() => fileRef.current?.click()} disabled={!store || loading}>
+            <Upload size={14} /> Excelファイルを選択
+          </button>
+          <input ref={fileRef} type="file" accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" style={{ display: "none" }} onChange={handleFile} />
+          <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} disabled={!preview && !loading} onClick={resetPreview}>
+            <X size={13} /> リセット
+          </button>
+          {loading && <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--ink-faint)" }}><Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> 読み込み中...</span>}
+        </div>
+
+        {preview && (
+          <div className="f4h-fade-in" style={{ marginTop: 18, borderTop: "1px solid var(--border-soft)", paddingTop: 16 }}>
+            <div style={{ display: "flex", gap: 14, fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 10, flexWrap: "wrap" }}>
+              <CounselingStatLine label="Excel行数" value={`${preview.stats.rowCount}件`} />
+              <CounselingStatLine label="有効取込件数" value={`${preview.stats.validCount}件`} />
+              <CounselingStatLine label="ZIP空欄除外" value={`${preview.stats.blankMemberIdCount}件`} />
+              <CounselingStatLine label="ZIP重複除外" value={`${preview.stats.duplicateMemberIdCount}件`} />
+              <CounselingStatLine label="LASTLOGIN空欄" value={`${preview.stats.lastLoginBlankCount}件`} />
+              <CounselingStatLine label="TR_LAST30D不明" value={`${preview.stats.trLast30dUnknownCount}件`} />
+              <span>ファイル <b>{preview.filename}</b></span>
+              <span>シート <b>{preview.sheetName}</b></span>
+            </div>
+            {preview.rows.length === 0 ? (
+              <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginBottom: 10 }}>
+                <AlertTriangle size={14} /> 保存対象行がありません。ZIP空欄またはZIP重複を確認してください。
+              </div>
+            ) : (
+              <>
+                <div className="scrollbar-thin" style={{ maxHeight: 220, overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8, marginBottom: 12 }}>
+                  <table className="f4h-table">
+                    <thead><tr><th>データ基準日</th><th>店舗</th><th>memberId</th><th>最終利用日</th><th>直近30日利用回数</th><th>importKey</th></tr></thead>
+                    <tbody>
+                      {preview.rows.slice(0, 50).map((row) => (
+                        <tr key={row.importKey}>
+                          <td>{row.snapshotDate}</td>
+                          <td>{row.store}</td>
+                          <td>{row.memberId}</td>
+                          <td>{row.lastLogin || "—"}</td>
+                          <td className="num">{row.trLast30d ?? "—"}</td>
+                          <td style={{ fontFamily: "monospace", fontSize: 11 }}>{row.importKey}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "9px 18px" }} onClick={handleImport}>
+                  <Check size={15} /> ミロンME利用サマリーを保存
+                </button>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="f4h-card" style={{ padding: 18 }}>
+        <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>保存状況・データ品質</div>
+        <div style={{ display: "flex", gap: 14, fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 10, flexWrap: "wrap" }}>
+          <CounselingStatLine label="保存済みミロンME利用サマリー" value={`${rows.length}件`} />
+          <CounselingStatLine label="最新データ基準日" value={meta.lastSnapshotDate || "—"} />
+          <CounselingStatLine label="対象店舗" value={meta.lastStore || "—"} />
+          <CounselingStatLine label="ZIP空欄除外" value={`${meta.blankMemberIdCount || 0}件`} />
+          <CounselingStatLine label="ZIP重複除外" value={`${meta.duplicateMemberIdCount || 0}件`} />
+          <CounselingStatLine label="LASTLOGIN空欄" value={`${meta.lastLoginBlankCount || 0}件`} />
+          <CounselingStatLine label="TR_LAST30D不明" value={`${meta.trLast30dUnknownCount || 0}件`} />
+          <CounselingStatLine label="最新取込ファイル名" value={meta.lastFileName || "—"} />
+          <CounselingStatLine label="最終取込日時" value={meta.lastImportedAt ? new Date(meta.lastImportedAt).toLocaleString("ja-JP") : "—"} />
+          <CounselingStatLine label="hacomono在籍者との単純照合率" value={matchRate == null ? "—" : pct1(matchRate)} />
+          <CounselingStatLine label="未照合memberId件数" value={activeMemberIds.size ? `${Math.max(rows.length - matchedCount, 0)}件` : "—"} />
+        </div>
+        <div style={{ fontSize: 11.8, color: "var(--ink-faint)", lineHeight: 1.6 }}>
+          照合率は保存済みのカウンセリング進捗用在籍者データとの単純memberId照合です。個人名・メール・電話番号・住所は表示しません。
+        </div>
+        {unmatchedSamples.length > 0 && (
+          <div style={{ marginTop: 10, fontSize: 12.5, color: "var(--ink-soft)" }}>
+            未照合memberIdサンプル: <span style={{ fontFamily: "monospace" }}>{unmatchedSamples.join(" / ")}</span>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -9410,6 +9786,7 @@ export default function App() {
       counselingNewMembers: [],
       counselingCancelMembers: [],
       aiAssistantSettings: defaultAiAssistantSettings(),
+      milonUserSnapshots: emptyMilonUserSnapshots(),
     };
     await Promise.all(Object.keys(empty).map((k) => sSet(SK[k], empty[k])));
     await sSet(SK.meta, { initialized: true, seededAt: new Date().toISOString(), version: 1, resetAt: new Date().toISOString() });
