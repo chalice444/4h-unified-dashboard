@@ -638,6 +638,12 @@ function milonUserImportKey(row) {
   const memberId = normalizeMilonMemberId(row?.memberId);
   return snapshotDate && memberId ? stableImportKey([snapshotDate, memberId]) : "";
 }
+function memberIdMatchKey(raw) {
+  const value = raw != null ? String(raw).normalize("NFKC").trim().replace(/[\u3000\s]/g, "") : "";
+  if (!value) return "";
+  if (/^\d+$/.test(value)) return String(Number(value));
+  return value;
+}
 function emptyMilonUserSnapshots() {
   return {
     rows: [],
@@ -3487,6 +3493,7 @@ const NAV_SECTIONS = [
       { key: "cancellation", label: "退会分析", icon: UserMinus },
       { key: "joinReason", label: "入会分析", icon: UserPlus },
       { key: "counseling", label: "カウンセリング分析", icon: UserCog },
+      { key: "usage", label: "利用分析", icon: Clock },
       { key: "marketing", label: "マーケティング分析", icon: Target },
     ],
   },
@@ -8395,6 +8402,252 @@ function CounselingCollapsibleSection({ title, sub, open, onToggle, children }) 
   );
 }
 
+function usageLatestSnapshotDate(rows) {
+  const dates = [...new Set((rows || []).map((row) => row.snapshotDate).filter(Boolean))].sort();
+  return dates[dates.length - 1] || "";
+}
+function usageDaysSince(snapshotDate, dateValue) {
+  if (!snapshotDate || !dateValue) return null;
+  const value = daysBetween(dateValue, snapshotDate);
+  return Number.isFinite(value) ? value : null;
+}
+function usageStartDate(row) {
+  return parseFlexibleDate(row?.startDate) || parseFlexibleDate(row?.planStartDate) || parseFlexibleDate(row?.joinDate) || parseFlexibleDate(row?.effectiveDate);
+}
+function usageStageLabel(row) {
+  const stage = row?.checkedStage || 0;
+  if (stage <= 0) return "初回未実施";
+  if (stage === 1) return "2回目未実施";
+  if (stage === 2) return "3回目未到達";
+  if (stage === 3) return "3回済み・次回4回目待ち";
+  return "4回目以降到達";
+}
+function usageBuildRows(data, snapshotDate, storeFilter) {
+  const allMilonRows = normalizeMilonUserSnapshots(data.milonUserSnapshots).rows || [];
+  const snapshotRows = allMilonRows.filter((row) => row.snapshotDate === snapshotDate);
+  const milonById = new Map();
+  for (const row of snapshotRows) {
+    const key = memberIdMatchKey(row.memberId);
+    if (key) milonById.set(key, row);
+  }
+  const activeRows = buildActiveCounselingProgress(data.counselingActiveMembers, data.counselingReservations);
+  const newRows = buildNewMemberCounselingProgress(data.counselingNewMembers, data.counselingReservations);
+  const newById = new Map(newRows.map((row) => [memberIdMatchKey(row.memberId), row]).filter(([key]) => key));
+  const active = activeRows
+    .filter((member) => storeFilter === "all" || member.store === storeFilter)
+    .map((member) => {
+      const key = memberIdMatchKey(member.memberId);
+      const milon = key ? milonById.get(key) : null;
+      const startDate = usageStartDate(member);
+      const daysSinceJoin = startDate ? usageDaysSince(snapshotDate, startDate) : null;
+      const daysSinceLastLogin = milon?.lastLogin ? usageDaysSince(snapshotDate, milon.lastLogin) : null;
+      return {
+        memberId: member.memberId,
+        matchKey: key,
+        store: member.store || "",
+        startDate,
+        daysSinceJoin,
+        milon,
+        matched: !!milon,
+        lastLogin: milon?.lastLogin || null,
+        trLast30d: milon ? milon.trLast30d : null,
+        daysSinceLastLogin,
+        checkedStage: member.checkedStage || 0,
+        counselingStage: usageStageLabel(member),
+        isNewMember: newById.has(key),
+        newMember: newById.get(key) || null,
+      };
+    });
+  const matched = active.filter((row) => row.matched);
+  const newMatched = active.filter((row) => row.matched && row.isNewMember && row.daysSinceJoin != null && row.daysSinceJoin >= 0 && row.daysSinceJoin <= 90);
+  return { allMilonRows, snapshotRows, milonById, active, matched, newMatched };
+}
+function usageCounts(rows) {
+  return {
+    zero: rows.filter((row) => row.trLast30d === 0).length,
+    one: rows.filter((row) => row.trLast30d === 1).length,
+    unknownTr: rows.filter((row) => row.trLast30d == null).length,
+    noLastLogin: rows.filter((row) => !row.lastLogin).length,
+    over14: rows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14).length,
+    over30: rows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 30).length,
+    over60: rows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 60).length,
+  };
+}
+function usageRiskLabel(row) {
+  if (row.trLast30d === 0 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 30) return "最優先";
+  if (row.trLast30d === 0 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14) return "次点";
+  if (row.trLast30d === 1) return "要観察";
+  if (!row.lastLogin || row.trLast30d == null) return "要確認";
+  return "通常";
+}
+function UsageKpiCard({ label, value, sub, tone = "neutral" }) {
+  return (
+    <div className={`f4h-card ${tone !== "neutral" ? `f4h-tone-${tone}` : ""}`} style={{ padding: 14, minHeight: 86 }}>
+      <div style={{ fontSize: 11.5, color: "var(--ink-faint)", marginBottom: 6, fontWeight: 700 }}>{label}</div>
+      <div className="num" style={{ fontSize: 24, fontWeight: 800, lineHeight: 1 }}>{value}</div>
+      {sub && <div style={{ marginTop: 7, fontSize: 11.5, color: "var(--ink-soft)" }}>{sub}</div>}
+    </div>
+  );
+}
+function UsageNotice() {
+  return (
+    <div className="f4h-card" style={{ padding: 14, background: "var(--surface-soft)", display: "grid", gap: 8 }}>
+      <div style={{ fontSize: 12.5, color: "var(--ink-soft)", lineHeight: 1.7 }}>
+        ミロンME利用サマリーは来店履歴明細ではありません。LASTLOGINは最終利用日、TR_LAST30Dはデータ基準日時点の直近30日利用回数です。入会から現在までの総来店日数や月別来店推移、退会前30日利用回数はこのデータだけでは算出できません。
+      </div>
+      <div style={{ fontSize: 12.5, color: "var(--ink-soft)", lineHeight: 1.7 }}>
+        ミロンME側には退会者・休会者・過去登録者が含まれる可能性があります。そのため、ミロンME全体に対する照合率は低く見える場合があります。在籍者分析では、hacomono在籍者を分母にした照合率を主指標として扱います。
+      </div>
+    </div>
+  );
+}
+function UsageMemberTable({ rows, limit = 80 }) {
+  const visible = rows.slice(0, limit);
+  return (
+    <div className="scrollbar-thin" style={{ overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8 }}>
+      <table className="f4h-table">
+        <thead><tr><th>memberId</th><th>店舗</th><th>入会経過日数</th><th>最終利用日</th><th>最終利用から</th><th>直近30日</th><th>カウンセリング</th><th>リスク</th></tr></thead>
+        <tbody>
+          {visible.map((row) => (
+            <tr key={row.memberId}>
+              <td>{row.memberId}</td>
+              <td style={{ textAlign: "left" }}>{row.store || "—"}</td>
+              <td className="num">{row.daysSinceJoin ?? "—"}</td>
+              <td>{row.lastLogin || "—"}</td>
+              <td className="num">{row.daysSinceLastLogin == null ? "—" : `${row.daysSinceLastLogin}日`}</td>
+              <td className="num">{row.trLast30d == null ? "不明" : `${row.trLast30d}回`}</td>
+              <td style={{ textAlign: "left" }}>{row.counselingStage}</td>
+              <td style={{ textAlign: "left" }}>{usageRiskLabel(row)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {rows.length > limit && <div style={{ padding: 10, fontSize: 12, color: "var(--ink-faint)" }}>先頭{limit}件を表示中（全{rows.length}件）</div>}
+    </div>
+  );
+}
+function UsageSummaryTab({ usage }) {
+  const counts = usageCounts(usage.matched);
+  const activeCount = usage.active.length;
+  const matchedCount = usage.matched.length;
+  const milonBaseRate = usage.snapshotRows.length ? matchedCount / usage.snapshotRows.length : null;
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <div className="f4h-kpi-grid">
+        <UsageKpiCard label="最新snapshotDate" value={usage.snapshotDate || "—"} />
+        <UsageKpiCard label="ミロンME保存件数" value={`${num(usage.snapshotRows.length)}件`} sub="選択snapshot" />
+        <UsageKpiCard label="hacomono在籍者数" value={`${num(activeCount)}人`} sub="スタッフ除外済み" />
+        <UsageKpiCard label="在籍者分母の照合率" value={pct1(activeCount ? matchedCount / activeCount : null)} sub={`${num(matchedCount)} / ${num(activeCount)}人`} tone="blue" />
+        <UsageKpiCard label="直近30日0回" value={`${num(counts.zero)}人`} tone="red" />
+        <UsageKpiCard label="直近30日1回" value={`${num(counts.one)}人`} tone="amber" />
+        <UsageKpiCard label="最終利用14日以上" value={`${num(counts.over14)}人`} />
+        <UsageKpiCard label="最終利用30日以上" value={`${num(counts.over30)}人`} />
+        <UsageKpiCard label="LASTLOGINなし" value={`${num(counts.noLastLogin)}人`} />
+        <UsageKpiCard label="TR_LAST30D不明" value={`${num(counts.unknownTr)}人`} />
+        <UsageKpiCard label="ミロンME全体分母の照合率" value={pct1(milonBaseRate)} sub="補助指標" />
+      </div>
+      <UsageNotice />
+    </div>
+  );
+}
+function UsageInitialRetentionTab({ usage }) {
+  const rows = usage.newMatched;
+  const c = usageCounts(rows);
+  const firstMissingZero = rows.filter((row) => row.checkedStage === 0 && row.trLast30d === 0).length;
+  const secondMissingLow = rows.filter((row) => row.checkedStage <= 1 && (row.trLast30d === 0 || row.trLast30d === 1)).length;
+  const thirdMissingLow = rows.filter((row) => row.checkedStage < 3 && (row.trLast30d === 0 || row.trLast30d === 1)).length;
+  const counselingIncompleteOver14 = rows.filter((row) => row.checkedStage < 4 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14).length;
+  const highRisk = rows.filter((row) => (row.trLast30d === 0 && row.daysSinceJoin <= 90) || (row.checkedStage === 0 && row.trLast30d === 0));
+  const mediumRisk = rows.filter((row) => row.trLast30d === 1 || (row.checkedStage < 4 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14));
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <div className="f4h-kpi-grid">
+        <UsageKpiCard label="入会90日以内 照合済み" value={`${num(rows.length)}人`} />
+        <UsageKpiCard label="30日以内×0回" value={`${num(rows.filter((r) => r.daysSinceJoin <= 30 && r.trLast30d === 0).length)}人`} tone="red" />
+        <UsageKpiCard label="60日以内×0回" value={`${num(rows.filter((r) => r.daysSinceJoin <= 60 && r.trLast30d === 0).length)}人`} tone="red" />
+        <UsageKpiCard label="90日以内×0回" value={`${num(c.zero)}人`} tone="red" />
+        <UsageKpiCard label="90日以内×1回" value={`${num(c.one)}人`} tone="amber" />
+        <UsageKpiCard label="初回未実施×0回" value={`${num(firstMissingZero)}人`} tone="red" />
+        <UsageKpiCard label="2回目未実施×0〜1回" value={`${num(secondMissingLow)}人`} />
+        <UsageKpiCard label="3回目未到達×0〜1回" value={`${num(thirdMissingLow)}人`} />
+        <UsageKpiCard label="最終利用14日以上" value={`${num(c.over14)}人`} />
+        <UsageKpiCard label="最終利用30日以上" value={`${num(c.over30)}人`} />
+        <UsageKpiCard label="LASTLOGINなし" value={`${num(c.noLastLogin)}人`} />
+        <UsageKpiCard label="高リスク" value={`${num(highRisk.length)}人`} tone="red" />
+        <UsageKpiCard label="中リスク" value={`${num(mediumRisk.length)}人`} tone="amber" />
+        <UsageKpiCard label="カウンセリング未完了×14日以上" value={`${num(counselingIncompleteOver14)}人`} />
+      </div>
+      <UsageMemberTable rows={[...highRisk, ...mediumRisk].filter((row, index, arr) => arr.findIndex((r) => r.memberId === row.memberId) === index)} />
+    </div>
+  );
+}
+function UsageDormantTab({ usage }) {
+  const rows = usage.matched;
+  const c = usageCounts(rows);
+  const top = rows.filter((row) => row.trLast30d === 0 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 30);
+  const second = rows.filter((row) => row.trLast30d === 0 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14 && row.daysSinceLastLogin < 30);
+  const watch = rows.filter((row) => row.trLast30d === 1);
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <div className="f4h-kpi-grid">
+        <UsageKpiCard label="在籍者照合済み" value={`${num(rows.length)}人`} />
+        <UsageKpiCard label="直近30日0回" value={`${num(c.zero)}人`} tone="red" />
+        <UsageKpiCard label="直近30日1回" value={`${num(c.one)}人`} tone="amber" />
+        <UsageKpiCard label="最終利用14日以上" value={`${num(c.over14)}人`} />
+        <UsageKpiCard label="最終利用30日以上" value={`${num(c.over30)}人`} />
+        <UsageKpiCard label="最終利用60日以上" value={`${num(c.over60)}人`} />
+        <UsageKpiCard label="LASTLOGINなし" value={`${num(c.noLastLogin)}人`} />
+        <UsageKpiCard label="TR_LAST30D不明" value={`${num(c.unknownTr)}人`} />
+        <UsageKpiCard label="最優先" value={`${num(top.length)}人`} tone="red" />
+        <UsageKpiCard label="次点" value={`${num(second.length)}人`} tone="amber" />
+        <UsageKpiCard label="要観察" value={`${num(watch.length)}人`} />
+      </div>
+      <UsageMemberTable rows={[...top, ...second, ...watch]} />
+    </div>
+  );
+}
+function UsageAnalysisView({ data }) {
+  const snapshots = useMemo(() => [...new Set(normalizeMilonUserSnapshots(data.milonUserSnapshots).rows.map((row) => row.snapshotDate).filter(Boolean))].sort(), [data.milonUserSnapshots]);
+  const latest = snapshots[snapshots.length - 1] || "";
+  const [snapshotDate, setSnapshotDate] = useState(latest);
+  const [storeFilter, setStoreFilter] = useState("all");
+  const [tab, setTab] = useState("summary");
+  useEffect(() => {
+    if (!snapshotDate && latest) setSnapshotDate(latest);
+  }, [snapshotDate, latest]);
+  const usage = useMemo(() => ({ ...usageBuildRows(data, snapshotDate || latest, storeFilter), snapshotDate: snapshotDate || latest }), [data, snapshotDate, latest, storeFilter]);
+  if (!snapshots.length) return <EmptyState icon={Clock} title="ミロンME利用サマリーが未取り込みです" sub="データ入力 > ミロンME利用サマリー からExcelを取り込んでください。" />;
+  return (
+    <div className="f4h-fade-in" style={{ display: "grid", gap: 16 }}>
+      <SectionHeading eyebrow="利用分析" title="ミロンME利用サマリー分析" />
+      <div className="f4h-card" style={{ padding: 14, display: "grid", gap: 12 }}>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+          <label style={{ fontSize: 12.5, color: "var(--ink-soft)", fontWeight: 700 }}>snapshotDate
+            <select className="f4h-input" style={{ marginTop: 4, minWidth: 180 }} value={snapshotDate || latest} onChange={(e) => setSnapshotDate(e.target.value)}>
+              {snapshots.map((date) => <option key={date} value={date}>{date}</option>)}
+            </select>
+          </label>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "end" }}>
+            <Pill active={storeFilter === "all"} onClick={() => setStoreFilter("all")}>全店</Pill>
+            {STORE_KEYS.map((store) => <Pill key={store} active={storeFilter === store} onClick={() => setStoreFilter(store)}>{store}</Pill>)}
+          </div>
+        </div>
+        <div style={{ fontSize: 12.3, color: "var(--ink-faint)", lineHeight: 1.6 }}>
+          店舗別KPIはhacomono側の所属店舗を優先して集計します。milon store と hacomono store が一致しない場合、店舗別の数字に差が出る可能性があります。
+        </div>
+      </div>
+      <SubTabs tabs={[
+        { key: "summary", label: "利用サマリー" },
+        { key: "initial", label: "初期定着" },
+        { key: "dormant", label: "在籍者休眠" },
+      ]} active={tab} onChange={setTab} />
+      {tab === "summary" && <UsageSummaryTab usage={usage} />}
+      {tab === "initial" && <UsageInitialRetentionTab usage={usage} />}
+      {tab === "dormant" && <UsageDormantTab usage={usage} />}
+    </div>
+  );
+}
+
 function ActiveCounselingProgressSection({ data, periodMode, setPeriodMode, customStartYm, setCustomStartYm, customEndYm, setCustomEndYm }) {
   const [storeFilter, setStoreFilter] = useState("all");
   const [listMode, setListMode] = useState("first");
@@ -9819,6 +10072,7 @@ export default function App() {
           {nav === "cancellation" && <CancellationAnalysisView data={data} showToast={showToast} />}
           {nav === "joinReason" && <JoinAnalysisView data={data} />}
           {nav === "counseling" && <CounselingAnalysisView data={data} updateData={updateData} showToast={showToast} onNavigate={setNav} />}
+          {nav === "usage" && <UsageAnalysisView data={data} />}
           {nav === "cvr" && <CvrAnalysisView data={data} />}
           {nav === "marketing" && (
             <React.Suspense fallback={<div style={{ padding: 24, color: "var(--ink-faint)" }}>読み込み中...</div>}>
