@@ -2078,8 +2078,12 @@ function sanitizeCancellationSurveyRaw(row) {
 function normalizeCancellationSurveyRegisteredAt(value) {
   const text = String(value || "").normalize("NFKC").trim();
   if (!text) return "";
-  const date = parseFlexibleDate(text);
-  const time = parseFlexibleTime(text);
+  const dateMatch = text.match(/(\d{4})(?:\/|-|年)(\d{1,2})(?:\/|-|月)(\d{1,2})日?/);
+  const date = dateMatch
+    ? `${dateMatch[1]}-${String(dateMatch[2]).padStart(2, "0")}-${String(dateMatch[3]).padStart(2, "0")}`
+    : parseFlexibleDate(text);
+  const timeMatch = text.match(/(\d{1,2}):(\d{2})/);
+  const time = timeMatch ? `${timeMatch[1].padStart(2, "0")}:${timeMatch[2]}` : null;
   return date ? `${date}${time ? ` ${time}` : ""}` : text.replace(/\s+/g, " ");
 }
 function cancellationSurveyCodeSummary(rawRows) {
@@ -2105,10 +2109,11 @@ function cancellationSurveyImportKeyFromParts({ surveyCode, memberId, registered
   return "";
 }
 function cancellationSurveyDedupKey(row) {
+  const raw = row?.raw && typeof row.raw === "object" ? row.raw : {};
   const canonicalKey = cancellationSurveyImportKeyFromParts({
-    surveyCode: row?.surveyCode || rowValue(row, ["コード", "回答ID", "回答 ID", "id", "surveyCode"]),
-    memberId: row?.memberId || rowValue(row, ["メンバー_ID", "メンバーID", "メンバー ID", "memberId", "member_id"]),
-    registeredAt: row?.registeredAt || rowValue(row, ["登録日時", "回答日時", "送信日時", "registeredAt"]),
+    surveyCode: row?.surveyCode || rowValue(row, ["コード", "回答ID", "回答 ID", "id", "surveyCode"]) || rowValue(raw, ["コード", "回答ID", "回答 ID", "id", "surveyCode"]),
+    memberId: row?.memberId || rowValue(row, ["メンバー_ID", "メンバーID", "メンバー ID", "memberId", "member_id"]) || rowValue(raw, ["メンバー_ID", "メンバーID", "メンバー ID", "memberId", "member_id"]),
+    registeredAt: row?.registeredAt || rowValue(row, ["登録日時", "回答日時", "送信日時", "registeredAt"]) || rowValue(raw, ["登録日時", "回答日時", "送信日時", "registeredAt"]),
     allowCodeFallback: false,
   });
   return canonicalKey || row?.importKey || "";
@@ -2124,6 +2129,20 @@ function monthlyCancellationSurveyCounts(rows) {
     counts[row.registeredMonth] = (counts[row.registeredMonth] || 0) + 1;
   }
   return Object.entries(counts).map(([ym, count]) => ({ ym, count })).sort((a, b) => b.ym.localeCompare(a.ym));
+}
+function dedupeCancellationSurveyRows(rows) {
+  const keyed = new Map();
+  const unkeyed = [];
+  for (const row of rows || []) {
+    const normalized = normalizeCancellationSurveySavedRow(row);
+    const key = cancellationSurveyDedupKey(normalized);
+    if (!key) {
+      unkeyed.push(normalized);
+      continue;
+    }
+    keyed.set(key, normalized);
+  }
+  return [...keyed.values(), ...unkeyed];
 }
 function parseCancellationSurveyRows(rawRows, filename = "") {
   const map = new Map();
@@ -2194,12 +2213,15 @@ function replaceCancellationSurveyImport(parsed) {
 }
 function mergeCancellationSurveyImport(currentValue, parsed) {
   const current = normalizeCancellationSurvey(currentValue);
-  const merged = mergeRowsByStableKey(current.rows, parsed.rows || [], cancellationSurveyDedupKey);
+  const currentRows = dedupeCancellationSurveyRows(current.rows);
+  const incomingRows = dedupeCancellationSurveyRows(parsed.rows || []);
+  const merged = mergeRowsByStableKey(currentRows, incomingRows, cancellationSurveyDedupKey);
   const meta = {
     ...(parsed.meta || emptyCancellationSurvey().meta),
     addedCount: merged.addedCount,
     updatedCount: merged.updatedCount,
     savedCount: merged.rows.length,
+    dedupedExistingCount: current.rows.length - currentRows.length,
     registeredMonths: monthlyCancellationSurveyCounts(merged.rows),
   };
   return {
@@ -6332,6 +6354,7 @@ function CancellationSurveyImportPanel({ data, updateData, showToast }) {
   const [csvText, setCsvText] = useState("");
   const [preview, setPreview] = useState(null);
   const [fileName, setFileName] = useState("");
+  const [importing, setImporting] = useState(false);
   const fileRef = useRef(null);
   const current = normalizeCancellationSurvey(data.cancellationSurvey);
   const monthCounts = current.meta?.registeredMonths?.length ? current.meta.registeredMonths : monthlyCancellationSurveyCounts(current.rows);
@@ -6371,13 +6394,20 @@ function CancellationSurveyImportPanel({ data, updateData, showToast }) {
     if (csvText.trim()) doParse(csvText, fileName || "貼り付け入力");
   }, [csvText, doParse, fileName]);
   const handleImport = async () => {
+    if (importing) return;
     if (!preview || !preview.rows.length) {
       showToast("保存対象の退会者アンケートデータがありません。", true);
       return;
     }
-    await updateData("cancellationSurvey", (cur) => mergeCancellationSurveyImport(cur, preview));
-    showToast(`退会者アンケート ${preview.rows.length}件を保存しました`);
-    reset();
+    setImporting(true);
+    try {
+      const saved = await updateData("cancellationSurvey", (cur) => mergeCancellationSurveyImport(cur, preview));
+      const savedRows = normalizeCancellationSurvey(saved).rows;
+      showToast(`退会者アンケート ${preview.rows.length}件を処理しました（保存後 ${savedRows.length}件）`);
+      reset();
+    } finally {
+      setImporting(false);
+    }
   };
   const handleDeleteAll = async () => {
     if (!window.confirm("保存済み退会者アンケートデータをすべて削除します。よろしいですか？この操作は元に戻せません。")) return;
@@ -6450,7 +6480,7 @@ function CancellationSurveyImportPanel({ data, updateData, showToast }) {
                     </tbody>
                   </table>
                 </div>
-                <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "9px 18px" }} onClick={handleImport}>
+                <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "9px 18px" }} onClick={handleImport} disabled={importing}>
                   <Check size={15} /> 退会者アンケート {preview.rows.length}件を保存する
                 </button>
               </>
