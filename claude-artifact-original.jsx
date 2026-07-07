@@ -2009,12 +2009,12 @@ const CANCELLATION_SURVEY_AGE_FILTERS = [
 ];
 const CANCELLATION_SURVEY_AGE_ROWS = ["10代以下", "20代", "30代", "40代", "50代", "60代以上", "年齢不明"];
 function emptyCancellationSurvey() {
-  return { rows: [], imports: [], meta: { lastImportedAt: null, lastFileName: null, rowCount: 0, validCount: 0, registeredMonths: [] } };
+  return { rows: [], imports: [], meta: { lastImportedAt: null, lastFileName: null, rowCount: 0, validCount: 0, skippedCount: 0, duplicateCount: 0, registeredMonths: [] } };
 }
 function normalizeCancellationSurvey(value) {
-  if (Array.isArray(value)) return { ...emptyCancellationSurvey(), rows: value };
+  if (Array.isArray(value)) return { ...emptyCancellationSurvey(), rows: value.map(normalizeCancellationSurveySavedRow) };
   if (!value || typeof value !== "object") return emptyCancellationSurvey();
-  const rows = Array.isArray(value.rows) ? value.rows : [];
+  const rows = Array.isArray(value.rows) ? value.rows.map(normalizeCancellationSurveySavedRow) : [];
   const imports = Array.isArray(value.imports) ? value.imports : [];
   return { rows, imports, meta: { ...emptyCancellationSurvey().meta, ...(value.meta || {}) } };
 }
@@ -2075,14 +2075,47 @@ function cancellationSurveyMailAllowed(value) {
 function sanitizeCancellationSurveyRaw(row) {
   return Object.fromEntries(Object.entries(row || {}).filter(([key]) => !String(key).includes("メールアドレス")));
 }
-function cancellationSurveyDedupKey(row) {
-  const memberId = normalizeMemberId(rowValue(row, ["メンバー_ID", "メンバーID", "メンバー ID"]));
-  const registeredAt = String(rowValue(row, ["登録日時"]) || "").trim();
-  if (memberId && registeredAt) return `${memberId}__${registeredAt}`;
-  const code = String(rowValue(row, ["コード"]) || "").trim();
-  const name = String(rowValue(row, ["メンバー_氏名", "氏名", "名称"]) || "").trim();
-  if (code || registeredAt || name) return `${code}__${registeredAt || ""}__${name}`;
+function normalizeCancellationSurveyRegisteredAt(value) {
+  const text = String(value || "").normalize("NFKC").trim();
+  if (!text) return "";
+  const date = parseFlexibleDate(text);
+  const time = parseFlexibleTime(text);
+  return date ? `${date}${time ? ` ${time}` : ""}` : text.replace(/\s+/g, " ");
+}
+function cancellationSurveyCodeSummary(rawRows) {
+  const counts = {};
+  for (const row of rawRows || []) {
+    const code = String(rowValue(row, ["コード", "回答ID", "回答 ID", "回答ID", "id", "surveyCode"]) || "").trim();
+    if (!code) continue;
+    counts[code] = (counts[code] || 0) + 1;
+  }
+  const values = Object.entries(counts).map(([code, count]) => ({ code, count }));
+  return {
+    uniqueCount: values.length,
+    sampleValues: values.slice(0, 5),
+    likelyAnswerId: values.length > 0 && values.length === (rawRows || []).length,
+  };
+}
+function cancellationSurveyImportKeyFromParts({ surveyCode, memberId, registeredAt, preferSurveyCode = false }) {
+  const code = String(surveyCode || "").trim();
+  if (preferSurveyCode && code) return `code:${code}`;
+  const id = normalizeMemberId(memberId);
+  const registered = normalizeCancellationSurveyRegisteredAt(registeredAt);
+  if (id && registered) return `member-registered:${stableImportKey([id, registered])}`;
   return "";
+}
+function cancellationSurveyDedupKey(row) {
+  if (row?.importKey) return row.importKey;
+  return cancellationSurveyImportKeyFromParts({
+    surveyCode: row?.surveyCode || rowValue(row, ["コード", "回答ID", "回答 ID", "id", "surveyCode"]),
+    memberId: row?.memberId || rowValue(row, ["メンバー_ID", "メンバーID", "メンバー ID", "memberId", "member_id"]),
+    registeredAt: row?.registeredAt || rowValue(row, ["登録日時", "回答日時", "送信日時", "registeredAt"]),
+    preferSurveyCode: false,
+  });
+}
+function normalizeCancellationSurveySavedRow(row) {
+  const importKey = cancellationSurveyDedupKey(row);
+  return importKey ? { ...row, importKey } : row;
 }
 function monthlyCancellationSurveyCounts(rows) {
   const counts = {};
@@ -2095,18 +2128,30 @@ function monthlyCancellationSurveyCounts(rows) {
 function parseCancellationSurveyRows(rawRows, filename = "") {
   const map = new Map();
   let skipped = 0;
+  let duplicateCount = 0;
+  const codeSummary = cancellationSurveyCodeSummary(rawRows);
   for (const row of rawRows || []) {
-    const key = cancellationSurveyDedupKey(row);
+    const surveyCode = String(rowValue(row, ["コード", "回答ID", "回答 ID", "id", "surveyCode"]) || "").trim();
+    const memberId = normalizeMemberId(rowValue(row, ["メンバー_ID", "メンバーID", "メンバー ID", "memberId", "member_id"]));
+    const registeredAt = String(rowValue(row, ["登録日時", "回答日時", "送信日時", "registeredAt"]) || "").trim();
+    const key = cancellationSurveyImportKeyFromParts({
+      surveyCode,
+      memberId,
+      registeredAt,
+      preferSurveyCode: codeSummary.likelyAnswerId,
+    });
     if (!key) {
       skipped += 1;
       continue;
     }
     const storeRaw = String(rowValue(row, ["店舗コード"]) || "").trim();
-    const registeredAt = String(rowValue(row, ["登録日時"]) || "").trim();
     const registeredDate = parseFlexibleDate(registeredAt);
     const age = Number(rowValue(row, ["メンバー_年齢", "年齢"])) || null;
+    if (map.has(key)) duplicateCount += 1;
     map.set(key, {
-      memberId: normalizeMemberId(rowValue(row, ["メンバー_ID", "メンバーID", "メンバー ID"])),
+      importKey: key,
+      surveyCode,
+      memberId,
       memberName: String(rowValue(row, ["メンバー_氏名", "氏名", "名称"]) || "").trim(),
       gender: String(rowValue(row, ["メンバー_性別", "性別"]) || "").trim(),
       age,
@@ -2127,11 +2172,15 @@ function parseCancellationSurveyRows(rawRows, filename = "") {
   return {
     rows,
     skipped,
+    codeSummary,
     meta: {
       lastImportedAt: new Date().toISOString(),
       lastFileName: filename || "貼り付け入力",
       rowCount: rawRows?.length || 0,
       validCount: rows.length,
+      skippedCount: skipped,
+      duplicateCount,
+      codeSummary,
       registeredMonths,
     },
   };
