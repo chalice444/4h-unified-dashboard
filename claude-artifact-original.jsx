@@ -4592,16 +4592,16 @@ function AiPromptModal({ data, settings, context, showToast, onClose }) {
     }
   };
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(28,31,27,.45)", zIndex: 220, display: "grid", placeItems: "center", padding: 18 }}>
-      <div className="f4h-card scrollbar-thin" style={{ width: "min(1040px, 100%)", maxHeight: "92vh", overflow: "auto", padding: 0 }}>
-        <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border-soft)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(28,31,27,.45)", zIndex: 220, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "clamp(8px, 3vh, 24px) 12px", overflow: "hidden" }}>
+      <div className="f4h-card" style={{ width: "min(1040px, 100%)", maxHeight: "calc(100vh - clamp(16px, 6vh, 48px))", overflow: "hidden", padding: 0, display: "flex", flexDirection: "column" }}>
+        <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border-soft)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexShrink: 0 }}>
           <div>
             <div style={{ fontWeight: 800, fontSize: 16 }}>AI施策検証</div>
             <div style={{ fontSize: 11.5, color: "var(--ink-faint)", marginTop: 3 }}>外部API送信は行わず、個人情報と自由記述原文を除いた集計プロンプトだけを生成します。</div>
           </div>
           <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: 8 }} onClick={onClose} aria-label="閉じる"><X size={16} /></button>
         </div>
-        <div style={{ padding: 16, display: "grid", gap: 14 }}>
+        <div className="scrollbar-thin" style={{ padding: 16, display: "grid", gap: 14, overflowY: "auto" }}>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button className={`f4h-btn f4h-focus ${mode === "A" ? "f4h-btn-primary" : "f4h-btn-outline"}`} style={{ padding: "8px 13px" }} onClick={() => setMode("A")}>Mode A 自前分析</button>
             <button className={`f4h-btn f4h-focus ${mode === "B" ? "f4h-btn-primary" : "f4h-btn-outline"}`} style={{ padding: "8px 13px" }} onClick={() => setMode("B")}>Mode B 外部レポート検証</button>
@@ -4620,7 +4620,7 @@ function AiPromptModal({ data, settings, context, showToast, onClose }) {
           )}
           <div className="f4h-card" style={{ padding: 12, background: "var(--surface-soft)" }}>
             <div style={{ fontWeight: 800, fontSize: 12.5, marginBottom: 8 }}>一時的に有効にするNG条件</div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 8 }}>
+            <div className="scrollbar-thin" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 8, maxHeight: "min(28vh, 210px)", overflowY: "auto", paddingRight: 4 }}>
               {AI_NG_CONDITIONS.map((item) => (
                 <label key={item.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--ink-soft)", fontWeight: 700 }}>
                   <input type="checkbox" checked={!!activeNg[item.id]} onChange={(e) => setActiveNg((cur) => ({ ...cur, [item.id]: e.target.checked }))} />
