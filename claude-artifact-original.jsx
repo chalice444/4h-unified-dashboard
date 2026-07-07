@@ -8461,7 +8461,35 @@ function usageBuildRows(data, snapshotDate, storeFilter) {
   const matched = active.filter((row) => row.matched);
   const newMatched = active.filter((row) => row.matched && row.isNewMember && row.daysSinceJoin != null && row.daysSinceJoin >= 0 && row.daysSinceJoin <= 90);
   const midMatched = active.filter((row) => row.matched && row.isNewMember && row.daysSinceJoin != null && row.daysSinceJoin >= 91 && row.daysSinceJoin <= 180);
-  return { allMilonRows, snapshotRows, milonById, active, matched, newMatched, midMatched };
+  const rawCancelRows = normalizeCounselingCancelMembers(data.counselingCancelMembers);
+  const cancelSourceRows = rawCancelRows.length ? rawCancelRows : normalizeCancellations(data.cancellations).rows;
+  const cancelRows = analysisRows(cancelSourceRows)
+    .filter((member) => storeFilter === "all" || matchStoreName(member.store || member.belongingStoreName || "") === storeFilter)
+    .map((member) => {
+      const key = memberIdMatchKey(member.memberId);
+      const milon = key ? milonById.get(key) : null;
+      const cancelDate = member.planEndDate || member.cancellationDate || null;
+      const lastLogin = milon?.lastLogin || null;
+      const lastLoginGapDays = usageSignedDaysBetween(lastLogin, cancelDate);
+      return {
+        memberId: member.memberId,
+        matchKey: key,
+        store: matchStoreName(member.store || member.belongingStoreName || "") || member.store || "",
+        cancelDate,
+        milon,
+        matched: !!milon,
+        lastLogin,
+        trLast30d: milon ? milon.trLast30d : null,
+        lastLoginGapDays,
+      };
+    });
+  return { allMilonRows, snapshotRows, milonById, active, matched, newMatched, midMatched, cancelRows };
+}
+function usageSignedDaysBetween(startStr, endStr) {
+  const start = parseDate(startStr);
+  const end = parseDate(endStr);
+  if (!start || !end) return null;
+  return Math.round((end.getTime() - start.getTime()) / 86400000);
 }
 function usageCounts(rows) {
   return {
@@ -8510,6 +8538,19 @@ function usageMidRiskLabel(row) {
   if (row.trLast30d === 1) return "要観察";
   if (row.checkedStage < 4 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14) return "カウンセリング要確認";
   return "対象外";
+}
+function usageCancelLastUseLabel(row) {
+  if (!row.cancelDate) return "退会日不明";
+  if (!row.matched) return "ミロン未照合";
+  if (!row.lastLogin) return "LASTLOGINなし";
+  if (row.lastLoginGapDays == null) return "算出不可";
+  if (row.lastLoginGapDays < 0) return "退会日後LASTLOGIN";
+  if (row.lastLoginGapDays <= 7) return "退会直前まで利用";
+  if (row.lastLoginGapDays <= 14) return "14日以内";
+  if (row.lastLoginGapDays <= 29) return "退会前に利用低下";
+  if (row.lastLoginGapDays >= 90) return "超長期休眠後退会";
+  if (row.lastLoginGapDays >= 60) return "長期休眠後退会";
+  return "休眠後退会";
 }
 function UsageRiskFilter({ options, active, onChange }) {
   return (
@@ -8723,6 +8764,92 @@ function UsageDormantTab({ usage }) {
     </div>
   );
 }
+function UsageCancelLastUseTable({ rows, limit = 80 }) {
+  const visible = rows.slice(0, limit);
+  return (
+    <div className="scrollbar-thin" style={{ overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8 }}>
+      <table className="f4h-table">
+        <thead><tr><th>memberId</th><th>店舗</th><th>退会日</th><th>最終利用日</th><th>空白日数</th><th>TR_LAST30D</th><th>リスク分類</th></tr></thead>
+        <tbody>
+          {visible.map((row) => (
+            <tr key={`${row.memberId || ""}-${row.cancelDate || ""}`}>
+              <td>{row.memberId}</td>
+              <td style={{ textAlign: "left" }}>{row.store || "—"}</td>
+              <td>{row.cancelDate || "—"}</td>
+              <td>{row.lastLogin || "—"}</td>
+              <td className="num">{row.lastLoginGapDays == null ? "—" : row.lastLoginGapDays < 0 ? `${Math.abs(row.lastLoginGapDays)}日後` : `${row.lastLoginGapDays}日`}</td>
+              <td className="num">{row.trLast30d == null ? "不明" : `${row.trLast30d}回`}</td>
+              <td style={{ textAlign: "left" }}>{usageCancelLastUseLabel(row)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {rows.length > limit && <div style={{ padding: 10, fontSize: 12, color: "var(--ink-faint)" }}>先頭{limit}件を表示中（全{rows.length}件）</div>}
+    </div>
+  );
+}
+function UsageCancelLastUseTab({ usage }) {
+  const rows = usage.cancelRows;
+  const matched = rows.filter((row) => row.matched);
+  const unmatched = rows.filter((row) => !row.matched);
+  const withLastLogin = rows.filter((row) => row.matched && row.lastLogin);
+  const noLastLogin = rows.filter((row) => row.matched && !row.lastLogin);
+  const noCancelDate = rows.filter((row) => !row.cancelDate);
+  const afterCancel = rows.filter((row) => row.lastLoginGapDays != null && row.lastLoginGapDays < 0);
+  const validGapRows = rows.filter((row) => row.lastLoginGapDays != null && row.lastLoginGapDays >= 0);
+  const within7 = validGapRows.filter((row) => row.lastLoginGapDays <= 7);
+  const within14 = validGapRows.filter((row) => row.lastLoginGapDays <= 14);
+  const between15And29 = validGapRows.filter((row) => row.lastLoginGapDays >= 15 && row.lastLoginGapDays <= 29);
+  const over30 = validGapRows.filter((row) => row.lastLoginGapDays >= 30);
+  const over60 = validGapRows.filter((row) => row.lastLoginGapDays >= 60);
+  const over90 = validGapRows.filter((row) => row.lastLoginGapDays >= 90);
+  const gapValues = validGapRows.map((row) => row.lastLoginGapDays);
+  const avgGap = gapValues.length ? gapValues.reduce((sum, value) => sum + value, 0) / gapValues.length : null;
+  const medianGap = medianOf(gapValues);
+  const [riskFilter, setRiskFilter] = useState("all");
+  const riskFilterOptions = [
+    { key: "all", label: "全件", count: rows.length },
+    { key: "used", label: "退会直前まで利用", count: within7.length },
+    { key: "low", label: "退会前に利用低下", count: between15And29.length },
+    { key: "dormant", label: "休眠後退会", count: over30.length },
+    { key: "longDormant", label: "長期休眠後退会", count: over60.length },
+    { key: "noLastLogin", label: "LASTLOGINなし", count: noLastLogin.length },
+    { key: "afterCancel", label: "退会日後LASTLOGIN", count: afterCancel.length },
+  ];
+  const tableRows = riskFilter === "used" ? within7
+    : riskFilter === "low" ? between15And29
+    : riskFilter === "dormant" ? over30
+    : riskFilter === "longDormant" ? over60
+    : riskFilter === "noLastLogin" ? noLastLogin
+    : riskFilter === "afterCancel" ? afterCancel
+    : rows;
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <div className="f4h-card" style={{ padding: 14, background: "var(--surface-soft)", fontSize: 12.5, color: "var(--ink-soft)", lineHeight: 1.7 }}>
+        この分析は、選択中snapshotDateのミロンME利用サマリーに残っているLASTLOGINと退会者CSVの退会日を照合し、最終利用日から退会日までの空白期間を集計しています。TR_LAST30Dはデータ基準日時点の直近30日利用回数であり、退会前30日利用回数ではありません。退会前30日・60日・90日の正確な利用回数や月別推移は、このデータだけでは算出できません。
+      </div>
+      <div className="f4h-kpi-grid">
+        <UsageKpiCard label="退会者数" value={`${num(rows.length)}人`} />
+        <UsageKpiCard label="ミロンME照合済み退会者数" value={`${num(matched.length)}人`} tone="blue" />
+        <UsageKpiCard label="ミロンME未照合退会者数" value={`${num(unmatched.length)}人`} />
+        <UsageKpiCard label="LASTLOGINあり退会者数" value={`${num(withLastLogin.length)}人`} />
+        <UsageKpiCard label="LASTLOGINなし退会者数" value={`${num(noLastLogin.length)}人`} />
+        <UsageKpiCard label="最終利用から退会まで7日以内" value={`${num(within7.length)}人`} />
+        <UsageKpiCard label="最終利用から退会まで14日以内" value={`${num(within14.length)}人`} />
+        <UsageKpiCard label="最終利用から退会まで15〜29日" value={`${num(between15And29.length)}人`} tone="amber" />
+        <UsageKpiCard label="最終利用から退会まで30日以上" value={`${num(over30.length)}人`} tone="red" />
+        <UsageKpiCard label="最終利用から退会まで60日以上" value={`${num(over60.length)}人`} />
+        <UsageKpiCard label="最終利用から退会まで90日以上" value={`${num(over90.length)}人`} />
+        <UsageKpiCard label="平均空白日数" value={avgGap == null ? "—" : `${Math.round(avgGap * 10) / 10}日`} />
+        <UsageKpiCard label="中央値空白日数" value={medianGap == null ? "—" : `${Math.round(medianGap * 10) / 10}日`} />
+        <UsageKpiCard label="退会日後LASTLOGIN" value={`${num(afterCancel.length)}人`} />
+        <UsageKpiCard label="退会日不明" value={`${num(noCancelDate.length)}人`} />
+      </div>
+      <UsageRiskFilter options={riskFilterOptions} active={riskFilter} onChange={setRiskFilter} />
+      <UsageCancelLastUseTable rows={tableRows} />
+    </div>
+  );
+}
 function UsageAnalysisView({ data }) {
   const snapshots = useMemo(() => [...new Set(normalizeMilonUserSnapshots(data.milonUserSnapshots).rows.map((row) => row.snapshotDate).filter(Boolean))].sort(), [data.milonUserSnapshots]);
   const latest = snapshots[snapshots.length - 1] || "";
@@ -8758,11 +8885,13 @@ function UsageAnalysisView({ data }) {
         { key: "initial", label: "初期定着" },
         { key: "mid", label: "中期定着" },
         { key: "dormant", label: "在籍者休眠" },
+        { key: "cancelLastUse", label: "退会者最終利用" },
       ]} active={tab} onChange={setTab} />
       {tab === "summary" && <UsageSummaryTab usage={usage} />}
       {tab === "initial" && <UsageInitialRetentionTab usage={usage} />}
       {tab === "mid" && <UsageMidRetentionTab usage={usage} />}
       {tab === "dormant" && <UsageDormantTab usage={usage} />}
+      {tab === "cancelLastUse" && <UsageCancelLastUseTab usage={usage} />}
     </div>
   );
 }
