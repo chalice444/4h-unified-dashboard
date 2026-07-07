@@ -8460,7 +8460,8 @@ function usageBuildRows(data, snapshotDate, storeFilter) {
     });
   const matched = active.filter((row) => row.matched);
   const newMatched = active.filter((row) => row.matched && row.isNewMember && row.daysSinceJoin != null && row.daysSinceJoin >= 0 && row.daysSinceJoin <= 90);
-  return { allMilonRows, snapshotRows, milonById, active, matched, newMatched };
+  const midMatched = active.filter((row) => row.matched && row.isNewMember && row.daysSinceJoin != null && row.daysSinceJoin >= 91 && row.daysSinceJoin <= 180);
+  return { allMilonRows, snapshotRows, milonById, active, matched, newMatched, midMatched };
 }
 function usageCounts(rows) {
   return {
@@ -8479,6 +8480,48 @@ function usageRiskLabel(row) {
   if (row.trLast30d === 1) return "要観察";
   if (!row.lastLogin || row.trLast30d == null) return "要確認";
   return "通常";
+}
+function usageUniqueRows(rows) {
+  return rows.filter((row, index, arr) => arr.findIndex((r) => r.memberId === row.memberId) === index);
+}
+function usageEarlyRiskBuckets(rows) {
+  const highRisk = rows.filter((row) => row.trLast30d === 0);
+  const mediumRisk = rows.filter((row) => row.trLast30d === 1 || (row.checkedStage < 4 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14));
+  const watch = rows.filter((row) => row.trLast30d === 1);
+  const counselingCheck = rows.filter((row) => row.checkedStage < 4 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14);
+  return { highRisk, mediumRisk, watch, counselingCheck };
+}
+function usageMidRiskBuckets(rows) {
+  const highRisk = rows.filter((row) => row.trLast30d === 0 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 30);
+  const mediumRisk = rows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14 && row.daysSinceLastLogin < 30);
+  const watch = rows.filter((row) => row.trLast30d === 1);
+  const counselingCheck = rows.filter((row) => row.checkedStage < 4 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14);
+  return { highRisk, mediumRisk, watch, counselingCheck };
+}
+function usageEarlyRiskLabel(row) {
+  if (row.trLast30d === 0) return "高リスク";
+  if (row.trLast30d === 1) return "要観察";
+  if (row.checkedStage < 4 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14) return "カウンセリング要確認";
+  return "対象";
+}
+function usageMidRiskLabel(row) {
+  if (row.trLast30d === 0 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 30) return "高リスク";
+  if (row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14 && row.daysSinceLastLogin < 30) return "中リスク";
+  if (row.trLast30d === 1) return "要観察";
+  if (row.checkedStage < 4 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14) return "カウンセリング要確認";
+  return "対象外";
+}
+function UsageRiskFilter({ options, active, onChange }) {
+  return (
+    <div className="f4h-card" style={{ padding: 12, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+      <span style={{ fontSize: 12, color: "var(--ink-soft)", fontWeight: 700 }}>一覧フィルター</span>
+      {options.map((option) => (
+        <Pill key={option.key} active={active === option.key} onClick={() => onChange(option.key)}>
+          {option.label} {num(option.count)}人
+        </Pill>
+      ))}
+    </div>
+  );
 }
 function UsageKpiCard({ label, value, sub, tone = "neutral" }) {
   return (
@@ -8501,7 +8544,7 @@ function UsageNotice() {
     </div>
   );
 }
-function UsageMemberTable({ rows, limit = 80 }) {
+function UsageMemberTable({ rows, limit = 80, riskLabel = usageRiskLabel }) {
   const visible = rows.slice(0, limit);
   return (
     <div className="scrollbar-thin" style={{ overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8 }}>
@@ -8517,7 +8560,7 @@ function UsageMemberTable({ rows, limit = 80 }) {
               <td className="num">{row.daysSinceLastLogin == null ? "—" : `${row.daysSinceLastLogin}日`}</td>
               <td className="num">{row.trLast30d == null ? "不明" : `${row.trLast30d}回`}</td>
               <td style={{ textAlign: "left" }}>{row.counselingStage}</td>
-              <td style={{ textAlign: "left" }}>{usageRiskLabel(row)}</td>
+              <td style={{ textAlign: "left" }}>{riskLabel(row)}</td>
             </tr>
           ))}
         </tbody>
@@ -8557,8 +8600,20 @@ function UsageInitialRetentionTab({ usage }) {
   const secondMissingLow = rows.filter((row) => row.checkedStage <= 1 && (row.trLast30d === 0 || row.trLast30d === 1)).length;
   const thirdMissingLow = rows.filter((row) => row.checkedStage < 3 && (row.trLast30d === 0 || row.trLast30d === 1)).length;
   const counselingIncompleteOver14 = rows.filter((row) => row.checkedStage < 4 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14).length;
-  const highRisk = rows.filter((row) => (row.trLast30d === 0 && row.daysSinceJoin <= 90) || (row.checkedStage === 0 && row.trLast30d === 0));
-  const mediumRisk = rows.filter((row) => row.trLast30d === 1 || (row.checkedStage < 4 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14));
+  const { highRisk, mediumRisk, watch, counselingCheck } = usageEarlyRiskBuckets(rows);
+  const [riskFilter, setRiskFilter] = useState("all");
+  const riskFilterOptions = [
+    { key: "all", label: "全件", count: rows.length },
+    { key: "high", label: "高リスク", count: highRisk.length },
+    { key: "medium", label: "中リスク", count: mediumRisk.length },
+    { key: "watch", label: "要観察", count: watch.length },
+    { key: "counseling", label: "カウンセリング要確認", count: counselingCheck.length },
+  ];
+  const tableRows = riskFilter === "high" ? highRisk
+    : riskFilter === "medium" ? mediumRisk
+    : riskFilter === "watch" ? watch
+    : riskFilter === "counseling" ? counselingCheck
+    : rows;
   return (
     <div style={{ display: "grid", gap: 16 }}>
       <div className="f4h-kpi-grid">
@@ -8575,9 +8630,59 @@ function UsageInitialRetentionTab({ usage }) {
         <UsageKpiCard label="LASTLOGINなし" value={`${num(c.noLastLogin)}人`} />
         <UsageKpiCard label="高リスク" value={`${num(highRisk.length)}人`} tone="red" />
         <UsageKpiCard label="中リスク" value={`${num(mediumRisk.length)}人`} tone="amber" />
+        <UsageKpiCard label="要観察" value={`${num(watch.length)}人`} />
         <UsageKpiCard label="カウンセリング未完了×14日以上" value={`${num(counselingIncompleteOver14)}人`} />
       </div>
-      <UsageMemberTable rows={[...highRisk, ...mediumRisk].filter((row, index, arr) => arr.findIndex((r) => r.memberId === row.memberId) === index)} />
+      <UsageRiskFilter options={riskFilterOptions} active={riskFilter} onChange={setRiskFilter} />
+      <UsageMemberTable rows={usageUniqueRows(tableRows)} riskLabel={usageEarlyRiskLabel} />
+    </div>
+  );
+}
+function UsageMidRetentionTab({ usage }) {
+  const rows = usage.midMatched;
+  const c = usageCounts(rows);
+  const firstMissingZero = rows.filter((row) => row.checkedStage === 0 && row.trLast30d === 0).length;
+  const secondMissingLow = rows.filter((row) => row.checkedStage <= 1 && (row.trLast30d === 0 || row.trLast30d === 1)).length;
+  const thirdMissingLow = rows.filter((row) => row.checkedStage < 3 && (row.trLast30d === 0 || row.trLast30d === 1)).length;
+  const counselingIncompleteOver14 = rows.filter((row) => row.checkedStage < 4 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14).length;
+  const { highRisk, mediumRisk, watch, counselingCheck } = usageMidRiskBuckets(rows);
+  const [riskFilter, setRiskFilter] = useState("all");
+  const riskFilterOptions = [
+    { key: "all", label: "全件", count: rows.length },
+    { key: "high", label: "高リスク", count: highRisk.length },
+    { key: "medium", label: "中リスク", count: mediumRisk.length },
+    { key: "watch", label: "要観察", count: watch.length },
+    { key: "counseling", label: "カウンセリング要確認", count: counselingCheck.length },
+  ];
+  const tableRows = riskFilter === "high" ? highRisk
+    : riskFilter === "medium" ? mediumRisk
+    : riskFilter === "watch" ? watch
+    : riskFilter === "counseling" ? counselingCheck
+    : rows;
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <div className="f4h-card" style={{ padding: 14, background: "var(--surface-soft)", fontSize: 12.5, color: "var(--ink-soft)", lineHeight: 1.7 }}>
+        中期定着は入会91〜180日の在籍者を対象に、ミロンME利用サマリーのLASTLOGINとTR_LAST30Dから現在の低利用・休眠予兆を確認します。ミロンME利用サマリーは来店履歴明細ではないため、91〜180日間の総利用回数や月別推移は算出できません。
+      </div>
+      <div className="f4h-kpi-grid">
+        <UsageKpiCard label="入会91〜180日 照合済み" value={`${num(rows.length)}人`} />
+        <UsageKpiCard label="91〜180日 × 直近30日0回" value={`${num(c.zero)}人`} tone="red" />
+        <UsageKpiCard label="91〜180日 × 直近30日1回" value={`${num(c.one)}人`} tone="amber" />
+        <UsageKpiCard label="91〜180日 × 最終利用14日以上" value={`${num(c.over14)}人`} />
+        <UsageKpiCard label="91〜180日 × 最終利用30日以上" value={`${num(c.over30)}人`} />
+        <UsageKpiCard label="91〜180日 × 最終利用60日以上" value={`${num(c.over60)}人`} />
+        <UsageKpiCard label="LASTLOGINなし" value={`${num(c.noLastLogin)}人`} />
+        <UsageKpiCard label="初回カウンセリング未実施×0回" value={`${num(firstMissingZero)}人`} tone="red" />
+        <UsageKpiCard label="2回目カウンセリング未実施×0〜1回" value={`${num(secondMissingLow)}人`} />
+        <UsageKpiCard label="3回目未到達×0〜1回" value={`${num(thirdMissingLow)}人`} />
+        <UsageKpiCard label="カウンセリング未完了×14日以上" value={`${num(counselingIncompleteOver14)}人`} />
+        <UsageKpiCard label="高リスク" value={`${num(highRisk.length)}人`} tone="red" />
+        <UsageKpiCard label="中リスク" value={`${num(mediumRisk.length)}人`} tone="amber" />
+        <UsageKpiCard label="要観察" value={`${num(watch.length)}人`} />
+        <UsageKpiCard label="カウンセリング要確認" value={`${num(counselingCheck.length)}人`} />
+      </div>
+      <UsageRiskFilter options={riskFilterOptions} active={riskFilter} onChange={setRiskFilter} />
+      <UsageMemberTable rows={usageUniqueRows(tableRows)} riskLabel={usageMidRiskLabel} />
     </div>
   );
 }
@@ -8587,6 +8692,17 @@ function UsageDormantTab({ usage }) {
   const top = rows.filter((row) => row.trLast30d === 0 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 30);
   const second = rows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14 && row.daysSinceLastLogin < 30);
   const watch = rows.filter((row) => row.trLast30d === 1);
+  const [riskFilter, setRiskFilter] = useState("all");
+  const riskFilterOptions = [
+    { key: "all", label: "全件", count: rows.length },
+    { key: "top", label: "最優先", count: top.length },
+    { key: "second", label: "次点（14〜29日未利用）", count: second.length },
+    { key: "watch", label: "要観察", count: watch.length },
+  ];
+  const tableRows = riskFilter === "top" ? top
+    : riskFilter === "second" ? second
+    : riskFilter === "watch" ? watch
+    : rows;
   return (
     <div style={{ display: "grid", gap: 16 }}>
       <div className="f4h-kpi-grid">
@@ -8602,7 +8718,8 @@ function UsageDormantTab({ usage }) {
         <UsageKpiCard label="次点（14〜29日未利用）" value={`${num(second.length)}人`} tone="amber" />
         <UsageKpiCard label="要観察" value={`${num(watch.length)}人`} />
       </div>
-      <UsageMemberTable rows={[...top, ...second, ...watch]} />
+      <UsageRiskFilter options={riskFilterOptions} active={riskFilter} onChange={setRiskFilter} />
+      <UsageMemberTable rows={usageUniqueRows(tableRows)} />
     </div>
   );
 }
@@ -8639,10 +8756,12 @@ function UsageAnalysisView({ data }) {
       <SubTabs tabs={[
         { key: "summary", label: "利用サマリー" },
         { key: "initial", label: "初期定着" },
+        { key: "mid", label: "中期定着" },
         { key: "dormant", label: "在籍者休眠" },
       ]} active={tab} onChange={setTab} />
       {tab === "summary" && <UsageSummaryTab usage={usage} />}
       {tab === "initial" && <UsageInitialRetentionTab usage={usage} />}
+      {tab === "mid" && <UsageMidRetentionTab usage={usage} />}
       {tab === "dormant" && <UsageDormantTab usage={usage} />}
     </div>
   );
