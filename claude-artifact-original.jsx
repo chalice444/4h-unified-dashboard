@@ -7497,7 +7497,7 @@ function NewMemberImportPanel({ data, updateData, showToast }) {
       </p>
       <div style={{ marginTop: 14, fontSize: 12.5, color: "var(--ink-soft)" }}>
         <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
-          <CounselingStatLine label="保存済み新規入会者データ 合計" value={`${newMembers.length}件`} />
+          <CounselingStatLine label="保存済み新規入会者母集団（進捗用）" value={`${newMembers.length}件`} />
           <CounselingStatLine label="最終取込日時" value={newMembersMeta.importedAt ? new Date(newMembersMeta.importedAt).toLocaleString("ja-JP") : "—"} />
           <CounselingStatLine label="直近取込ファイル名" value={newMembersMeta.filename || "—"} />
           <CounselingStatLine label="今回取込の総行数" value={`${newMembersMeta.rowCount || 0}件`} />
