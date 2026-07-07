@@ -8475,7 +8475,7 @@ function usageCounts(rows) {
 }
 function usageRiskLabel(row) {
   if (row.trLast30d === 0 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 30) return "最優先";
-  if (row.trLast30d === 0 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14) return "次点";
+  if (row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14 && row.daysSinceLastLogin < 30) return "次点（14〜29日未利用）";
   if (row.trLast30d === 1) return "要観察";
   if (!row.lastLogin || row.trLast30d == null) return "要確認";
   return "通常";
@@ -8585,7 +8585,7 @@ function UsageDormantTab({ usage }) {
   const rows = usage.matched;
   const c = usageCounts(rows);
   const top = rows.filter((row) => row.trLast30d === 0 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 30);
-  const second = rows.filter((row) => row.trLast30d === 0 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14 && row.daysSinceLastLogin < 30);
+  const second = rows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14 && row.daysSinceLastLogin < 30);
   const watch = rows.filter((row) => row.trLast30d === 1);
   return (
     <div style={{ display: "grid", gap: 16 }}>
@@ -8599,7 +8599,7 @@ function UsageDormantTab({ usage }) {
         <UsageKpiCard label="LASTLOGINなし" value={`${num(c.noLastLogin)}人`} />
         <UsageKpiCard label="TR_LAST30D不明" value={`${num(c.unknownTr)}人`} />
         <UsageKpiCard label="最優先" value={`${num(top.length)}人`} tone="red" />
-        <UsageKpiCard label="次点" value={`${num(second.length)}人`} tone="amber" />
+        <UsageKpiCard label="次点（14〜29日未利用）" value={`${num(second.length)}人`} tone="amber" />
         <UsageKpiCard label="要観察" value={`${num(watch.length)}人`} />
       </div>
       <UsageMemberTable rows={[...top, ...second, ...watch]} />
