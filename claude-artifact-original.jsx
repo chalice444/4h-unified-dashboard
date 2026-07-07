@@ -1450,6 +1450,69 @@ function parseCounselingCancelMembers(rawRows, newMembersValue) {
   stats.excludedCount = stats.rowCount - stats.validCount;
   return { rows, stats };
 }
+function buildCounselingCancelMembersFromCancellations(cancellationsValue, newMembersValue) {
+  const cancellationRows = normalizeCancellations(cancellationsValue).rows || [];
+  const staffPlanExcludedCount = cancellationRows.filter(isStaffPlan).length;
+  const blankStoreExcludedCount = cancellationRows.filter((row) => !isStaffPlan(row) && hasExplicitBlankStore(row)).length;
+  const newMembersById = new Map(analysisRows(normalizeCounselingNewMembers(newMembersValue)).map((member) => [member.memberId, member]));
+  const map = new Map();
+  const stats = {
+    rowCount: cancellationRows.length,
+    validCount: 0,
+    excludedCount: 0,
+    staffPlanExcludedCount,
+    blankStoreExcludedCount,
+    blankMemberIdCount: 0,
+    duplicateMemberIdCount: 0,
+    unknownStartDateCount: 0,
+    unknownCancelMonthCount: 0,
+  };
+  for (const row of analysisRows(cancellationRows)) {
+    const memberId = normalizeMemberId(row?.memberId);
+    if (!memberId) {
+      stats.blankMemberIdCount += 1;
+      continue;
+    }
+    const matchingNewMember = newMembersById.get(memberId);
+    const joinDate = row?.joinDate || null;
+    const startDate = matchingNewMember?.startDate || joinDate;
+    const planEndDate = row?.planEndDate || null;
+    const cancelMember = {
+      memberId,
+      name: String(row?.name || "").trim(),
+      gender: String(row?.gender || "").trim(),
+      age: Number(row?.age) || null,
+      belongingStoreName: String(row?.belongingStoreName || row?.storeRaw || row?.store || "").trim(),
+      store: matchStoreName(row?.store || row?.belongingStoreName || row?.storeRaw || "") || String(row?.store || "").trim(),
+      joinDate,
+      startDate,
+      startMonth: monthOfIsoDate(startDate),
+      planName: String(row?.planName || "").trim(),
+      planContractDate: row?.planContractDate || null,
+      planStartDate: row?.planStartDate || null,
+      planEndDate,
+      cancelMonth: cancellationMonthOf(row),
+      cancellationRequestDate: row?.cancellationRequestDate || null,
+      startDateSource: matchingNewMember?.startDate ? "newMembers" : "cancelCsvJoinDate",
+    };
+    if (!cancelMember.startDate) stats.unknownStartDateCount += 1;
+    if (!cancelMember.cancelMonth) stats.unknownCancelMonthCount += 1;
+    const key = counselingCancelMemberImportKey(cancelMember);
+    if (map.has(key)) {
+      stats.duplicateMemberIdCount += 1;
+      const existing = map.get(key);
+      const existingEnd = existing.planEndDate || "";
+      const incomingEnd = cancelMember.planEndDate || "";
+      console.warn("[counseling] duplicate cancel member event key from saved cancellations; selecting latest plan end date or later row", key);
+      if (incomingEnd < existingEnd) continue;
+    }
+    map.set(key, cancelMember);
+  }
+  const rows = [...map.values()];
+  stats.validCount = rows.length;
+  stats.excludedCount = stats.rowCount - stats.validCount;
+  return { rows, stats };
+}
 function counselingStatusIsCheckedIn(status) {
   return counselingReservationIsPerformed({ reservationStatus: status });
 }
@@ -6021,33 +6084,53 @@ function CancellationImportPanel({ data, updateData, showToast }) {
       rawMonthCounts: preview.rawMonthCounts,
       validMonthCounts: preview.validMonthCounts,
     };
-    const counselingRows = preview.counselingRows || [];
-    if (!counselingRows.length) {
-      showToast("カウンセリング分析用の退会者データを作成できませんでした。CSVのメンバーIDとプラン契約適用終了日を確認してください。", true);
+    let mergedCancellations = null;
+    await updateData("cancellations", (cur) => {
+      mergedCancellations = mergeCancellationImport(cur, payloadInput, preview.source);
+      return mergedCancellations;
+    });
+    const rebuiltCounseling = buildCounselingCancelMembersFromCancellations(mergedCancellations, data.counselingNewMembers);
+    if (!rebuiltCounseling.rows.length) {
+      showToast("カウンセリング分析用の退会者データを作成できませんでした。保存済み退会者明細のメンバーIDとプラン契約適用終了日を確認してください。", true);
       return;
     }
-    await updateData("cancellations", (cur) => mergeCancellationImport(cur, payloadInput, preview.source));
     await updateData("counselingCancelMembers", (cur) => (
       mergeCounselingMemberMonthImport(
-        cur,
-        counselingRows,
-        preview.counselingStats,
+        { ...cur, rows: [] },
+        rebuiltCounseling.rows,
+        rebuiltCounseling.stats,
         preview.source?.filename,
         counselingCancelMemberMonthOf,
         counselingCancelMemberImportKey
       )
     ));
-    showToast(`退会者データ ${preview.rows.length}件を保存し、カウンセリング分析用退会者データ ${counselingRows.length}件も更新しました`);
+    showToast(`退会者データ ${preview.rows.length}件を保存し、カウンセリング分析用退会者データ ${rebuiltCounseling.rows.length}件も更新しました`);
     reset();
   };
   const handleDeleteMonth = async (ym, count) => {
     if (!window.confirm(`${cancellationMonthLabel(ym)}の退会者データ${count}件を削除します。よろしいですか？`)) return;
-    await updateData("cancellations", (cur) => deleteCancellationMonth(cur, ym));
+    let nextCancellations = null;
+    await updateData("cancellations", (cur) => {
+      nextCancellations = deleteCancellationMonth(cur, ym);
+      return nextCancellations;
+    });
+    const rebuiltCounseling = buildCounselingCancelMembersFromCancellations(nextCancellations, data.counselingNewMembers);
+    await updateData("counselingCancelMembers", (cur) => (
+      mergeCounselingMemberMonthImport(
+        { ...cur, rows: [] },
+        rebuiltCounseling.rows,
+        rebuiltCounseling.stats,
+        null,
+        counselingCancelMemberMonthOf,
+        counselingCancelMemberImportKey
+      )
+    ));
     showToast(`${cancellationMonthLabel(ym)}の退会者データを削除しました`);
   };
   const handleDeleteAll = async () => {
     if (!window.confirm("保存済み退会者データをすべて削除します。よろしいですか？この操作は元に戻せません。")) return;
     await updateData("cancellations", (cur) => deleteAllCancellations(cur));
+    await updateData("counselingCancelMembers", (cur) => deleteAllCounselingMembers(cur, normalizeCounselingCancelMembersMeta));
     showToast("保存済み退会者データをすべて削除しました");
   };
 
