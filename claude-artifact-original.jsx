@@ -1513,6 +1513,33 @@ function buildCounselingCancelMembersFromCancellations(cancellationsValue, newMe
   stats.excludedCount = stats.rowCount - stats.validCount;
   return { rows, stats };
 }
+function replaceCounselingCancelMembersFromRebuild(rebuilt, filename = null) {
+  const rows = rebuilt?.rows || [];
+  const stats = rebuilt?.stats || {};
+  const importedAt = new Date().toISOString();
+  const importMonths = [...new Set(rows.map(counselingCancelMemberMonthOf).filter(Boolean))];
+  return {
+    rows,
+    imports: [{
+      importedAt,
+      fileName: filename || null,
+      months: importMonths,
+      totalRows: stats.rowCount || 0,
+      validRows: rows.length,
+      addedRows: rows.length,
+      updatedRows: 0,
+      rebuiltFrom: "cancellations",
+    }],
+    meta: {
+      importedAt,
+      filename: filename || null,
+      lastImportedAt: importedAt,
+      lastFileName: filename || null,
+      rebuiltFrom: "cancellations",
+      ...(stats || {}),
+    },
+  };
+}
 function counselingStatusIsCheckedIn(status) {
   return counselingReservationIsPerformed({ reservationStatus: status });
 }
@@ -6084,46 +6111,26 @@ function CancellationImportPanel({ data, updateData, showToast }) {
       rawMonthCounts: preview.rawMonthCounts,
       validMonthCounts: preview.validMonthCounts,
     };
-    let mergedCancellations = null;
-    await updateData("cancellations", (cur) => {
-      mergedCancellations = mergeCancellationImport(cur, payloadInput, preview.source);
-      return mergedCancellations;
-    });
-    const rebuiltCounseling = buildCounselingCancelMembersFromCancellations(mergedCancellations, data.counselingNewMembers);
+    const savedCancellations = await updateData("cancellations", (cur) => (
+      mergeCancellationImport(cur, payloadInput, preview.source)
+    ));
+    const rebuiltCounseling = buildCounselingCancelMembersFromCancellations(savedCancellations, data.counselingNewMembers);
     if (!rebuiltCounseling.rows.length) {
       showToast("カウンセリング分析用の退会者データを作成できませんでした。保存済み退会者明細のメンバーIDとプラン契約適用終了日を確認してください。", true);
       return;
     }
-    await updateData("counselingCancelMembers", (cur) => (
-      mergeCounselingMemberMonthImport(
-        { ...cur, rows: [] },
-        rebuiltCounseling.rows,
-        rebuiltCounseling.stats,
-        preview.source?.filename,
-        counselingCancelMemberMonthOf,
-        counselingCancelMemberImportKey
-      )
+    await updateData("counselingCancelMembers", () => (
+      replaceCounselingCancelMembersFromRebuild(rebuiltCounseling, preview.source?.filename)
     ));
     showToast(`退会者データ ${preview.rows.length}件を保存し、カウンセリング分析用退会者データ ${rebuiltCounseling.rows.length}件も更新しました`);
     reset();
   };
   const handleDeleteMonth = async (ym, count) => {
     if (!window.confirm(`${cancellationMonthLabel(ym)}の退会者データ${count}件を削除します。よろしいですか？`)) return;
-    let nextCancellations = null;
-    await updateData("cancellations", (cur) => {
-      nextCancellations = deleteCancellationMonth(cur, ym);
-      return nextCancellations;
-    });
-    const rebuiltCounseling = buildCounselingCancelMembersFromCancellations(nextCancellations, data.counselingNewMembers);
-    await updateData("counselingCancelMembers", (cur) => (
-      mergeCounselingMemberMonthImport(
-        { ...cur, rows: [] },
-        rebuiltCounseling.rows,
-        rebuiltCounseling.stats,
-        null,
-        counselingCancelMemberMonthOf,
-        counselingCancelMemberImportKey
-      )
+    const savedCancellations = await updateData("cancellations", (cur) => deleteCancellationMonth(cur, ym));
+    const rebuiltCounseling = buildCounselingCancelMembersFromCancellations(savedCancellations, data.counselingNewMembers);
+    await updateData("counselingCancelMembers", () => (
+      replaceCounselingCancelMembersFromRebuild(rebuiltCounseling)
     ));
     showToast(`${cancellationMonthLabel(ym)}の退会者データを削除しました`);
   };
@@ -9304,8 +9311,10 @@ export default function App() {
     try {
       const next = await mutate(key, mutateFn);
       setData((d) => ({ ...d, [key]: next }));
+      return next;
     } catch (e) {
       showToast("保存に失敗しました。通信状態を確認してもう一度お試しください。", true);
+      throw e;
     }
   }, [showToast]);
 
