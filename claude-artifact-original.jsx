@@ -3077,6 +3077,125 @@ function buildAiCounselingSummary(data) {
     "注記: 個別会員名・会員ID・担当者別の個票は含めていません。詳細傾向は未集計の場合があります。",
   ].join("\n");
 }
+function buildAiUsageScopeLabel(data) {
+  const rows = normalizeMilonUserSnapshots(data?.milonUserSnapshots).rows || [];
+  const snapshots = [...new Set(rows.map((row) => row.snapshotDate).filter(Boolean))].sort();
+  const latest = snapshots[snapshots.length - 1] || "";
+  return latest
+    ? `ミロンME利用サマリー latest snapshotDate ${latest} / 全店`
+    : "ミロンME利用サマリー未取込";
+}
+function aiUsageCount(label, count, total = null) {
+  const suffix = total == null ? "" : ` (${aiPct(count, total)})`;
+  return `- ${label}: ${num(count)}人${suffix}`;
+}
+function buildAiUsageAnalysisSummary(data) {
+  const rows = normalizeMilonUserSnapshots(data?.milonUserSnapshots).rows || [];
+  const snapshots = [...new Set(rows.map((row) => row.snapshotDate).filter(Boolean))].sort();
+  const latest = snapshots[snapshots.length - 1] || "";
+  if (!latest) return "ミロンME利用サマリー分析: 未集計 / ミロンME利用サマリー未取込";
+  const usage = usageBuildRows(data || {}, latest, "all");
+  const dormantRows = usage.matched;
+  const dormantCounts = usageCounts(dormantRows);
+  const initialRows = usage.newMatched;
+  const initialCounts = usageCounts(initialRows);
+  const initialRisk = usageEarlyRiskBuckets(initialRows);
+  const midRows = usage.midMatched;
+  const midCounts = usageCounts(midRows);
+  const midRisk = usageMidRiskBuckets(midRows);
+  const top = dormantRows.filter((row) => row.trLast30d === 0 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 30);
+  const second = dormantRows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14 && row.daysSinceLastLogin < 30);
+  const watch = dormantRows.filter((row) => row.trLast30d === 1);
+  const cancelRows = usage.cancelRows;
+  const cancelMatched = cancelRows.filter((row) => row.matched);
+  const cancelUnmatched = cancelRows.filter((row) => !row.matched);
+  const cancelWithLastLogin = cancelRows.filter((row) => row.matched && row.lastLogin);
+  const cancelNoLastLogin = cancelRows.filter((row) => row.matched && !row.lastLogin);
+  const cancelNoDate = cancelRows.filter((row) => !row.cancelDate);
+  const cancelAfterLogin = cancelRows.filter((row) => row.lastLoginGapDays != null && row.lastLoginGapDays < 0);
+  const validGapRows = cancelRows.filter((row) => row.lastLoginGapDays != null && row.lastLoginGapDays >= 0);
+  const gapValues = validGapRows.map((row) => row.lastLoginGapDays);
+  const avgGap = gapValues.length ? gapValues.reduce((sum, value) => sum + value, 0) / gapValues.length : null;
+  const medianGap = medianOf(gapValues);
+  const within7 = validGapRows.filter((row) => row.lastLoginGapDays <= 7);
+  const within14 = validGapRows.filter((row) => row.lastLoginGapDays <= 14);
+  const between15And29 = validGapRows.filter((row) => row.lastLoginGapDays >= 15 && row.lastLoginGapDays <= 29);
+  const over30 = validGapRows.filter((row) => row.lastLoginGapDays >= 30);
+  const over60 = validGapRows.filter((row) => row.lastLoginGapDays >= 60);
+  const over90 = validGapRows.filter((row) => row.lastLoginGapDays >= 90);
+  return [
+    `対象snapshotDate: ${latest}`,
+    "データの前提:",
+    "- ミロンME利用サマリーは来店履歴明細ではありません。",
+    "- LASTLOGINは最終利用日です。",
+    "- TR_LAST30Dはデータ基準日時点の直近30日利用回数であり、退会前30日利用回数ではありません。",
+    "- 入会から現在までの総来店日数、月別利用推移、退会前30日・60日・90日の正確な利用回数は、このデータだけでは算出できません。",
+    "- 退会者最終利用分析では、退会日とLASTLOGINの差分だけを根拠として扱います。",
+    "- 個人名、個人識別子、メール、電話番号、住所、自由記述原文は含めていません。",
+    "",
+    "在籍者休眠サマリー:",
+    aiUsageCount("在籍者 照合済み", dormantRows.length),
+    aiUsageCount("直近30日0回", dormantCounts.zero, dormantRows.length),
+    aiUsageCount("直近30日1回", dormantCounts.one, dormantRows.length),
+    aiUsageCount("最終利用14日以上", dormantCounts.over14, dormantRows.length),
+    aiUsageCount("最終利用30日以上", dormantCounts.over30, dormantRows.length),
+    aiUsageCount("最終利用60日以上", dormantCounts.over60, dormantRows.length),
+    aiUsageCount("LASTLOGINなし", dormantCounts.noLastLogin, dormantRows.length),
+    aiUsageCount("TR_LAST30D不明", dormantCounts.unknownTr, dormantRows.length),
+    aiUsageCount("最優先", top.length, dormantRows.length),
+    aiUsageCount("次点（14〜29日未利用）", second.length, dormantRows.length),
+    aiUsageCount("要観察", watch.length, dormantRows.length),
+    "",
+    "初期定着サマリー:",
+    aiUsageCount("入会0〜90日 照合済み", initialRows.length),
+    aiUsageCount("高リスク", initialRisk.highRisk.length, initialRows.length),
+    aiUsageCount("中リスク", initialRisk.mediumRisk.length, initialRows.length),
+    aiUsageCount("要観察", initialRisk.watch.length, initialRows.length),
+    aiUsageCount("カウンセリング要確認", initialRisk.counselingCheck.length, initialRows.length),
+    aiUsageCount("直近30日0回", initialCounts.zero, initialRows.length),
+    aiUsageCount("直近30日1回", initialCounts.one, initialRows.length),
+    aiUsageCount("最終利用14日以上", initialCounts.over14, initialRows.length),
+    aiUsageCount("最終利用30日以上", initialCounts.over30, initialRows.length),
+    aiUsageCount("LASTLOGINなし", initialCounts.noLastLogin, initialRows.length),
+    "",
+    "中期定着サマリー:",
+    aiUsageCount("入会91〜180日 照合済み", midRows.length),
+    aiUsageCount("高リスク", midRisk.highRisk.length, midRows.length),
+    aiUsageCount("中リスク", midRisk.mediumRisk.length, midRows.length),
+    aiUsageCount("要観察", midRisk.watch.length, midRows.length),
+    aiUsageCount("カウンセリング要確認", midRisk.counselingCheck.length, midRows.length),
+    aiUsageCount("91〜180日 × 直近30日0回", midCounts.zero, midRows.length),
+    aiUsageCount("91〜180日 × 直近30日1回", midCounts.one, midRows.length),
+    aiUsageCount("91〜180日 × 最終利用14日以上", midCounts.over14, midRows.length),
+    aiUsageCount("91〜180日 × 最終利用30日以上", midCounts.over30, midRows.length),
+    aiUsageCount("91〜180日 × 最終利用60日以上", midCounts.over60, midRows.length),
+    aiUsageCount("LASTLOGINなし", midCounts.noLastLogin, midRows.length),
+    "",
+    "退会者最終利用サマリー:",
+    aiUsageCount("退会者数", cancelRows.length),
+    aiUsageCount("ミロンME照合済み退会者数", cancelMatched.length, cancelRows.length),
+    aiUsageCount("ミロンME未照合退会者数", cancelUnmatched.length, cancelRows.length),
+    aiUsageCount("LASTLOGINあり退会者数", cancelWithLastLogin.length, cancelRows.length),
+    aiUsageCount("LASTLOGINなし退会者数", cancelNoLastLogin.length, cancelRows.length),
+    aiUsageCount("最終利用から退会まで7日以内", within7.length, cancelRows.length),
+    aiUsageCount("最終利用から退会まで14日以内", within14.length, cancelRows.length),
+    aiUsageCount("最終利用から退会まで15〜29日", between15And29.length, cancelRows.length),
+    aiUsageCount("最終利用から退会まで30日以上", over30.length, cancelRows.length),
+    aiUsageCount("最終利用から退会まで60日以上", over60.length, cancelRows.length),
+    aiUsageCount("最終利用から退会まで90日以上", over90.length, cancelRows.length),
+    `- 平均空白日数: ${avgGap == null ? "-" : `${Number(avgGap).toFixed(1)}日`}`,
+    `- 中央値空白日数: ${medianGap == null ? "-" : `${Number(medianGap).toFixed(1)}日`}`,
+    aiUsageCount("退会日後LASTLOGIN", cancelAfterLogin.length, cancelRows.length),
+    aiUsageCount("退会日不明", cancelNoDate.length, cancelRows.length),
+    "",
+    "施策検証上の注意:",
+    "- 直近30日0回や最終利用30日以上は、退会前兆の候補として優先確認してください。ただし、退会前の正確な30日利用回数ではありません。",
+    "- 初期定着は入会0〜90日の未利用・低利用、中期定着は入会91〜180日の中だるみ、在籍者休眠は全在籍者の低利用・休眠予兆として解釈してください。",
+    "- 退会者最終利用では、最終利用停止から退会までの空白期間が長いほど、退会手続き時点より前に介入余地があった可能性を検証してください。",
+    "- 30日以上・60日以上・90日以上の人数比率、平均空白日数、中央値空白日数を見て、介入タイミングの妥当性を判断してください。",
+    "- 数値根拠が弱い施策や個人単位の対応リスト作成は避け、既存オペレーション内で検証可能な施策に限定してください。",
+  ].join("\n");
+}
 function buildAiSettingsBlock(settings) {
   const s = normalizeAiAssistantSettings(settings);
   const storeLines = STORE_KEYS.map((store) => {
@@ -3127,6 +3246,7 @@ function buildAiAssistantPrompt({ mode, data, settings, activeNgIds, externalRep
     `退会分析: ${context?.cancellationLabel || "保存済み退会データ全体"}`,
     `退会理由分析: ${context?.surveyLabel || "保存済み退会アンケート全体"}`,
     `カウンセリング分析: ${buildAiCounselingScopeLabel(data)}`,
+    `利用分析: ${buildAiUsageScopeLabel(data)}`,
     "",
     "## 安全な集計データ（個人情報・自由記述原文なし）",
     "### 退会分析",
@@ -3137,6 +3257,9 @@ function buildAiAssistantPrompt({ mode, data, settings, activeNgIds, externalRep
     "",
     "### カウンセリング分析",
     buildAiCounselingSummary(data),
+    "",
+    "### ミロンME利用サマリー分析",
+    buildAiUsageAnalysisSummary(data),
     ...(modeKey === "B" ? [
       "",
       "## 検証対象の外部レポート",
