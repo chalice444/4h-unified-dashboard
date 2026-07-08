@@ -3187,6 +3187,8 @@ function buildAiUsageAnalysisSummary(data) {
     `- 中央値空白日数: ${medianGap == null ? "-" : `${Number(medianGap).toFixed(1)}日`}`,
     aiUsageCount("退会日後LASTLOGIN", cancelAfterLogin.length, cancelRows.length),
     aiUsageCount("退会日不明", cancelNoDate.length, cancelRows.length),
+    "- 退会日後LASTLOGINは、退会日とLASTLOGINの対応が逆転しているため、空白日数の平均・中央値・日数バケットからは除外しています。再入会・退会日データと利用履歴のズレ・退会後利用などの可能性があるため、施策根拠としては慎重に扱ってください。",
+    "- 再入会者・複数退会イベントがある場合、現在のLASTLOGINと過去の退会イベントが対応せず、退会日とLASTLOGINの差分にズレが生じる可能性があります。退会者最終利用の集計は、集計傾向として扱い、個別イベントの正確な利用停止日として断定しないでください。",
     "",
     "施策検証上の注意:",
     "- 直近30日0回や最終利用30日以上は、退会前兆の候補として優先確認してください。ただし、退会前の正確な30日利用回数ではありません。",
