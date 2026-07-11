@@ -8882,7 +8882,22 @@ function UsageNotice() {
     </div>
   );
 }
-function UsageMemberTable({ rows, limit = 80, riskLabel = usageRiskLabel }) {
+const USAGE_INITIAL_VISIBLE_LIMIT = 80;
+function UsageVisibleLimitControls({ total, limit, onShowMore, onShowAll, onReset }) {
+  const visibleCount = Math.min(limit, total);
+  if (total <= USAGE_INITIAL_VISIBLE_LIMIT) return null;
+  const isAllVisible = visibleCount >= total;
+  const remaining = total - visibleCount;
+  return (
+    <div style={{ padding: 10, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 12, color: "var(--ink-faint)" }}>
+      <span>{isAllVisible ? `全${num(total)}件を表示中` : `先頭${num(visibleCount)}件を表示中（全${num(total)}件）`}</span>
+      {!isAllVisible && <button type="button" className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={onShowMore}>{remaining <= USAGE_INITIAL_VISIBLE_LIMIT ? `残り${num(remaining)}件を表示` : `さらに${USAGE_INITIAL_VISIBLE_LIMIT}件表示`}</button>}
+      {!isAllVisible && <button type="button" className="f4h-btn f4h-btn-ghost f4h-focus" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={onShowAll}>全件表示</button>}
+      {limit > USAGE_INITIAL_VISIBLE_LIMIT && <button type="button" className="f4h-btn f4h-btn-ghost f4h-focus" style={{ padding: "5px 9px", fontSize: 11.5 }} onClick={onReset}>80件に戻す</button>}
+    </div>
+  );
+}
+function UsageMemberTable({ rows, limit = USAGE_INITIAL_VISIBLE_LIMIT, riskLabel = usageRiskLabel, onShowMore, onShowAll, onReset }) {
   const visible = rows.slice(0, limit);
   return (
     <div className="scrollbar-thin" style={{ overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8 }}>
@@ -8903,7 +8918,7 @@ function UsageMemberTable({ rows, limit = 80, riskLabel = usageRiskLabel }) {
           ))}
         </tbody>
       </table>
-      {rows.length > limit && <div style={{ padding: 10, fontSize: 12, color: "var(--ink-faint)" }}>先頭{limit}件を表示中（全{rows.length}件）</div>}
+      <UsageVisibleLimitControls total={rows.length} limit={limit} onShowMore={onShowMore} onShowAll={onShowAll} onReset={onReset} />
     </div>
   );
 }
@@ -8941,6 +8956,7 @@ function UsageInitialRetentionTab({ usage }) {
   const { highRisk, mediumRisk, watch, counselingCheck } = usageEarlyRiskBuckets(rows);
   const [riskFilter, setRiskFilter] = useState("all");
   const [sortKey, setSortKey] = useState("riskHigh");
+  const [visibleLimit, setVisibleLimit] = useState(USAGE_INITIAL_VISIBLE_LIMIT);
   const riskFilterOptions = [
     { key: "all", label: "全件", count: rows.length },
     { key: "high", label: "高リスク", count: highRisk.length },
@@ -8973,8 +8989,8 @@ function UsageInitialRetentionTab({ usage }) {
         <UsageKpiCard label="要観察" value={`${num(watch.length)}人`} />
         <UsageKpiCard label="カウンセリング未完了×14日以上" value={`${num(counselingIncompleteOver14)}人`} />
       </div>
-      <UsageRiskFilter options={riskFilterOptions} active={riskFilter} onChange={setRiskFilter} sortOptions={USAGE_MEMBER_SORT_OPTIONS} sortKey={sortKey} onSortChange={setSortKey} />
-      <UsageMemberTable rows={sortedTableRows} riskLabel={usageEarlyRiskLabel} />
+      <UsageRiskFilter options={riskFilterOptions} active={riskFilter} onChange={(value) => { setRiskFilter(value); setVisibleLimit(USAGE_INITIAL_VISIBLE_LIMIT); }} sortOptions={USAGE_MEMBER_SORT_OPTIONS} sortKey={sortKey} onSortChange={(value) => { setSortKey(value); setVisibleLimit(USAGE_INITIAL_VISIBLE_LIMIT); }} />
+      <UsageMemberTable rows={sortedTableRows} limit={visibleLimit} riskLabel={usageEarlyRiskLabel} onShowMore={() => setVisibleLimit((limit) => limit + USAGE_INITIAL_VISIBLE_LIMIT)} onShowAll={() => setVisibleLimit(sortedTableRows.length)} onReset={() => setVisibleLimit(USAGE_INITIAL_VISIBLE_LIMIT)} />
     </div>
   );
 }
@@ -8988,6 +9004,7 @@ function UsageMidRetentionTab({ usage }) {
   const { highRisk, mediumRisk, watch, counselingCheck } = usageMidRiskBuckets(rows);
   const [riskFilter, setRiskFilter] = useState("all");
   const [sortKey, setSortKey] = useState("riskHigh");
+  const [visibleLimit, setVisibleLimit] = useState(USAGE_INITIAL_VISIBLE_LIMIT);
   const riskFilterOptions = [
     { key: "all", label: "全件", count: rows.length },
     { key: "high", label: "高リスク", count: highRisk.length },
@@ -9023,8 +9040,8 @@ function UsageMidRetentionTab({ usage }) {
         <UsageKpiCard label="要観察" value={`${num(watch.length)}人`} />
         <UsageKpiCard label="カウンセリング要確認" value={`${num(counselingCheck.length)}人`} />
       </div>
-      <UsageRiskFilter options={riskFilterOptions} active={riskFilter} onChange={setRiskFilter} sortOptions={USAGE_MEMBER_SORT_OPTIONS} sortKey={sortKey} onSortChange={setSortKey} />
-      <UsageMemberTable rows={sortedTableRows} riskLabel={usageMidRiskLabel} />
+      <UsageRiskFilter options={riskFilterOptions} active={riskFilter} onChange={(value) => { setRiskFilter(value); setVisibleLimit(USAGE_INITIAL_VISIBLE_LIMIT); }} sortOptions={USAGE_MEMBER_SORT_OPTIONS} sortKey={sortKey} onSortChange={(value) => { setSortKey(value); setVisibleLimit(USAGE_INITIAL_VISIBLE_LIMIT); }} />
+      <UsageMemberTable rows={sortedTableRows} limit={visibleLimit} riskLabel={usageMidRiskLabel} onShowMore={() => setVisibleLimit((limit) => limit + USAGE_INITIAL_VISIBLE_LIMIT)} onShowAll={() => setVisibleLimit(sortedTableRows.length)} onReset={() => setVisibleLimit(USAGE_INITIAL_VISIBLE_LIMIT)} />
     </div>
   );
 }
@@ -9036,6 +9053,7 @@ function UsageDormantTab({ usage }) {
   const watch = rows.filter((row) => row.trLast30d === 1);
   const [riskFilter, setRiskFilter] = useState("all");
   const [sortKey, setSortKey] = useState("riskHigh");
+  const [visibleLimit, setVisibleLimit] = useState(USAGE_INITIAL_VISIBLE_LIMIT);
   const riskFilterOptions = [
     { key: "all", label: "全件", count: rows.length },
     { key: "top", label: "最優先", count: top.length },
@@ -9062,12 +9080,12 @@ function UsageDormantTab({ usage }) {
         <UsageKpiCard label="次点（14〜29日未利用）" value={`${num(second.length)}人`} tone="amber" />
         <UsageKpiCard label="要観察" value={`${num(watch.length)}人`} />
       </div>
-      <UsageRiskFilter options={riskFilterOptions} active={riskFilter} onChange={setRiskFilter} sortOptions={USAGE_MEMBER_SORT_OPTIONS} sortKey={sortKey} onSortChange={setSortKey} />
-      <UsageMemberTable rows={sortedTableRows} />
+      <UsageRiskFilter options={riskFilterOptions} active={riskFilter} onChange={(value) => { setRiskFilter(value); setVisibleLimit(USAGE_INITIAL_VISIBLE_LIMIT); }} sortOptions={USAGE_MEMBER_SORT_OPTIONS} sortKey={sortKey} onSortChange={(value) => { setSortKey(value); setVisibleLimit(USAGE_INITIAL_VISIBLE_LIMIT); }} />
+      <UsageMemberTable rows={sortedTableRows} limit={visibleLimit} onShowMore={() => setVisibleLimit((limit) => limit + USAGE_INITIAL_VISIBLE_LIMIT)} onShowAll={() => setVisibleLimit(sortedTableRows.length)} onReset={() => setVisibleLimit(USAGE_INITIAL_VISIBLE_LIMIT)} />
     </div>
   );
 }
-function UsageCancelLastUseTable({ rows, limit = 80 }) {
+function UsageCancelLastUseTable({ rows, limit = USAGE_INITIAL_VISIBLE_LIMIT, onShowMore, onShowAll, onReset }) {
   const visible = rows.slice(0, limit);
   return (
     <div className="scrollbar-thin" style={{ overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8 }}>
@@ -9087,7 +9105,7 @@ function UsageCancelLastUseTable({ rows, limit = 80 }) {
           ))}
         </tbody>
       </table>
-      {rows.length > limit && <div style={{ padding: 10, fontSize: 12, color: "var(--ink-faint)" }}>先頭{limit}件を表示中（全{rows.length}件）</div>}
+      <UsageVisibleLimitControls total={rows.length} limit={limit} onShowMore={onShowMore} onShowAll={onShowAll} onReset={onReset} />
     </div>
   );
 }
@@ -9111,6 +9129,7 @@ function UsageCancelLastUseTab({ usage }) {
   const medianGap = medianOf(gapValues);
   const [riskFilter, setRiskFilter] = useState("all");
   const [sortKey, setSortKey] = useState("gapDesc");
+  const [visibleLimit, setVisibleLimit] = useState(USAGE_INITIAL_VISIBLE_LIMIT);
   const riskFilterOptions = [
     { key: "all", label: "全件", count: rows.length },
     { key: "used", label: "退会直前まで利用", count: within7.length },
@@ -9150,8 +9169,8 @@ function UsageCancelLastUseTab({ usage }) {
         <UsageKpiCard label="退会日後LASTLOGIN" value={`${num(afterCancel.length)}人`} />
         <UsageKpiCard label="退会日不明" value={`${num(noCancelDate.length)}人`} />
       </div>
-      <UsageRiskFilter options={riskFilterOptions} active={riskFilter} onChange={setRiskFilter} sortOptions={USAGE_CANCEL_SORT_OPTIONS} sortKey={sortKey} onSortChange={setSortKey} />
-      <UsageCancelLastUseTable rows={sortedTableRows} />
+      <UsageRiskFilter options={riskFilterOptions} active={riskFilter} onChange={(value) => { setRiskFilter(value); setVisibleLimit(USAGE_INITIAL_VISIBLE_LIMIT); }} sortOptions={USAGE_CANCEL_SORT_OPTIONS} sortKey={sortKey} onSortChange={(value) => { setSortKey(value); setVisibleLimit(USAGE_INITIAL_VISIBLE_LIMIT); }} />
+      <UsageCancelLastUseTable rows={sortedTableRows} limit={visibleLimit} onShowMore={() => setVisibleLimit((limit) => limit + USAGE_INITIAL_VISIBLE_LIMIT)} onShowAll={() => setVisibleLimit(sortedTableRows.length)} onReset={() => setVisibleLimit(USAGE_INITIAL_VISIBLE_LIMIT)} />
     </div>
   );
 }
@@ -9193,10 +9212,10 @@ function UsageAnalysisView({ data }) {
         { key: "cancelLastUse", label: "退会者最終利用" },
       ]} active={tab} onChange={setTab} />
       {tab === "summary" && <UsageSummaryTab usage={usage} />}
-      {tab === "initial" && <UsageInitialRetentionTab usage={usage} />}
-      {tab === "mid" && <UsageMidRetentionTab usage={usage} />}
-      {tab === "dormant" && <UsageDormantTab usage={usage} />}
-      {tab === "cancelLastUse" && <UsageCancelLastUseTab usage={usage} />}
+      {tab === "initial" && <UsageInitialRetentionTab key={`initial-${snapshotDate || latest}-${storeFilter}`} usage={usage} />}
+      {tab === "mid" && <UsageMidRetentionTab key={`mid-${snapshotDate || latest}-${storeFilter}`} usage={usage} />}
+      {tab === "dormant" && <UsageDormantTab key={`dormant-${snapshotDate || latest}-${storeFilter}`} usage={usage} />}
+      {tab === "cancelLastUse" && <UsageCancelLastUseTab key={`cancelLastUse-${snapshotDate || latest}-${storeFilter}`} usage={usage} />}
     </div>
   );
 }
