@@ -803,6 +803,116 @@ function mergeMilonUserSnapshots(currentValue, parsed, source) {
     meta,
   };
 }
+const DEFAULT_LTV_MANUAL_EXCLUDE_IDS = ["728", "209", "727", "908", "909", "1039", "1351", "1537", "1684", "1168", "1994"];
+function emptyLtvSnapshots() {
+  return { rows: [], meta: { lastImportedAt: null, lastFileName: null, rowCount: 0, validCount: 0, blankMemberIdCount: 0, duplicateMemberIdCount: 0 } };
+}
+function normalizeLtvSnapshots(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return emptyLtvSnapshots();
+  return { rows: Array.isArray(value.rows) ? value.rows : [], meta: { ...emptyLtvSnapshots().meta, ...(value.meta || {}) } };
+}
+function normalizeLtvManualExcludeIds(value) {
+  const values = Array.isArray(value) ? value : String(value ?? "").split(/[\s,，、]+/);
+  return [...new Set(values.map(memberIdMatchKey).filter(Boolean))];
+}
+function parseLtvAmount(raw) {
+  const value = String(raw ?? "").normalize("NFKC").replace(/[￥¥,\s]/g, "").trim();
+  if (!value) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+function parseLtvRows(rawRows) {
+  const byMemberId = new Map();
+  let blankMemberIdCount = 0;
+  let duplicateMemberIdCount = 0;
+  for (const raw of rawRows || []) {
+    const memberId = memberIdMatchKey(rowValue(raw, ["メンバーID", "メンバー ID", "会員ID", "memberId"]));
+    if (!memberId) {
+      blankMemberIdCount += 1;
+      continue;
+    }
+    if (byMemberId.has(memberId)) duplicateMemberIdCount += 1;
+    byMemberId.set(memberId, {
+      memberId,
+      ltv: parseLtvAmount(rowValue(raw, ["LTV", "ltv", "購入金額累計"])),
+      joinDate: parseFlexibleDate(rowValue(raw, ["入会日時"])),
+      store: String(rowValue(raw, ["メンバー所属店舗名", "所属店舗名"]) || "").trim() || "不明",
+      planName: String(rowValue(raw, ["契約プラン名"]) || "").trim(),
+      planEndDate: parseFlexibleDate(rowValue(raw, ["プラン契約適用終了日"])),
+      name: String(rowValue(raw, ["氏名", "メンバー氏名"]) || "").trim(),
+    });
+  }
+  return {
+    rows: [...byMemberId.values()],
+    stats: { rowCount: (rawRows || []).length, validCount: byMemberId.size, blankMemberIdCount, duplicateMemberIdCount },
+  };
+}
+function ltvTenureBand(months) {
+  if (months == null) return null;
+  if (months <= 3) return "3ヶ月以内";
+  if (months <= 6) return "4〜6ヶ月";
+  if (months <= 12) return "7〜12ヶ月";
+  if (months <= 24) return "13〜24ヶ月";
+  return "25ヶ月以上";
+}
+function ltvMetricSummary(rows) {
+  const ltvValues = rows.map((row) => row.ltv).filter((value) => value != null);
+  const tenureValues = rows.map((row) => row.observedMonths).filter((value) => value != null);
+  const monthlyValues = rows.map((row) => row.monthlyLtv).filter((value) => value != null);
+  return {
+    count: rows.length,
+    ltvTotal: ltvValues.reduce((sum, value) => sum + value, 0),
+    ltvAverage: ltvValues.length ? ltvValues.reduce((sum, value) => sum + value, 0) / ltvValues.length : null,
+    ltvMedian: medianOf(ltvValues),
+    observedMonthsAverage: tenureValues.length ? tenureValues.reduce((sum, value) => sum + value, 0) / tenureValues.length : null,
+    monthlyLtvAverage: monthlyValues.length ? monthlyValues.reduce((sum, value) => sum + value, 0) / monthlyValues.length : null,
+  };
+}
+function buildLtvAnalysis(data) {
+  const snapshot = normalizeLtvSnapshots(data?.ltvSnapshots);
+  const manualIds = new Set(normalizeLtvManualExcludeIds(data?.ltvManualExcludeIds));
+  const activeIds = new Set(normalizeCounselingActiveMembers(data?.counselingActiveMembers).map((row) => memberIdMatchKey(row.memberId)).filter(Boolean));
+  const cancelSource = [
+    ...normalizeCounselingCancelMembers(data?.counselingCancelMembers),
+    ...normalizeCancellations(data?.cancellations).rows,
+  ];
+  const cancelById = new Map();
+  for (const row of cancelSource) {
+    const key = memberIdMatchKey(row.memberId);
+    if (key && !cancelById.has(key)) cancelById.set(key, row);
+  }
+  const excluded = { staffPlan: 0, testName: 0, manual: 0 };
+  const rows = [];
+  const snapshotDate = parseFlexibleDate(snapshot.meta.lastImportedAt);
+  for (const source of snapshot.rows) {
+    if (isStaffPlan(source)) { excluded.staffPlan += 1; continue; }
+    if (String(source.name || "").includes("テスト")) { excluded.testName += 1; continue; }
+    if (manualIds.has(memberIdMatchKey(source.memberId))) { excluded.manual += 1; continue; }
+    const memberId = memberIdMatchKey(source.memberId);
+    const cancelRow = cancelById.get(memberId);
+    const status = activeIds.has(memberId) ? "在籍者" : cancelRow ? "退会者" : "不明";
+    const observationEnd = status === "在籍者" ? snapshotDate : status === "退会者" ? (cancelRow?.planEndDate || source.planEndDate) : null;
+    const observedMonths = source.joinDate && observationEnd ? monthsBetween(source.joinDate, observationEnd) : null;
+    rows.push({
+      memberId,
+      ltv: source.ltv,
+      store: matchStoreName(source.store) || "不明",
+      status,
+      observedMonths,
+      tenureBand: ltvTenureBand(observedMonths),
+      monthlyLtv: source.ltv != null && observedMonths != null && observedMonths >= 1 ? source.ltv / observedMonths : null,
+    });
+  }
+  return {
+    rows,
+    excluded,
+    manualRegisteredCount: manualIds.size,
+    blankMemberIdCount: snapshot.meta.blankMemberIdCount || 0,
+    duplicateMemberIdCount: snapshot.meta.duplicateMemberIdCount || 0,
+    snapshot,
+    activeAndCancelCount: [...activeIds].filter((id) => cancelById.has(id)).length,
+  };
+}
 function normalizeStaffPlanText(value) {
   return String(value ?? "").normalize("NFKC").replace(/[　\s]/g, "").toLowerCase();
 }
@@ -2760,6 +2870,8 @@ const SK = {
   counselingCancelMembers: "counseling:cancelMembers",
   aiAssistantSettings: "aiAssistantSettings",
   milonUserSnapshots: "milonUserSnapshots",
+  ltvSnapshots: "ltvSnapshots",
+  ltvManualExcludeIds: "ltvManualExcludeIds",
 };
 function withTimeout(promise, ms, label) {
   return new Promise((resolve, reject) => {
@@ -2798,11 +2910,11 @@ async function ensureSeeded() {
   return true;
 }
 async function loadAllData() {
-  const [staff, trials, joins, memberMonthly, baselines, budgetTargets, revenueActuals, settings, cancellations, cancellationSurvey, joinSurvey, counselingReservations, counselingMeta, counselingActiveMembers, counselingNewMembers, counselingCancelMembers, aiAssistantSettings, milonUserSnapshots] = await Promise.all([
+  const [staff, trials, joins, memberMonthly, baselines, budgetTargets, revenueActuals, settings, cancellations, cancellationSurvey, joinSurvey, counselingReservations, counselingMeta, counselingActiveMembers, counselingNewMembers, counselingCancelMembers, aiAssistantSettings, milonUserSnapshots, ltvSnapshots, ltvManualExcludeIds] = await Promise.all([
     sGet(SK.staff), sGet(SK.trials), sGet(SK.joins), sGet(SK.memberMonthly),
     sGet(SK.baselines), sGet(SK.budgetTargets), sGet(SK.revenueActuals), sGet(SK.settings),
     sGet(SK.cancellations), sGet(SK.cancellationSurvey), sGet(SK.joinSurvey), sGet(SK.counselingReservations), sGet(SK.counselingMeta), sGet(SK.counselingActiveMembers), sGet(SK.counselingNewMembers), sGet(SK.counselingCancelMembers),
-    sGet(SK.aiAssistantSettings), sGet(SK.milonUserSnapshots),
+    sGet(SK.aiAssistantSettings), sGet(SK.milonUserSnapshots), sGet(SK.ltvSnapshots), sGet(SK.ltvManualExcludeIds),
   ]);
   return {
     staff: staff || SEED_DATA.staff,
@@ -2829,6 +2941,8 @@ async function loadAllData() {
       : normalizeCounselingCancelMembers(counselingCancelMembers),
     aiAssistantSettings: normalizeAiAssistantSettings(aiAssistantSettings),
     milonUserSnapshots: normalizeMilonUserSnapshots(milonUserSnapshots),
+    ltvSnapshots: normalizeLtvSnapshots(ltvSnapshots),
+    ltvManualExcludeIds: normalizeLtvManualExcludeIds(ltvManualExcludeIds == null ? DEFAULT_LTV_MANUAL_EXCLUDE_IDS : ltvManualExcludeIds),
   };
 }
 // read-modify-write: 同時編集での上書きリスクを下げる
@@ -3619,6 +3733,7 @@ const NAV_SECTIONS = [
       { key: "joinReason", label: "入会分析", icon: UserPlus },
       { key: "counseling", label: "カウンセリング分析", icon: UserCog },
       { key: "usage", label: "利用分析", icon: Clock },
+      { key: "ltv", label: "LTV分析", icon: Banknote },
       { key: "marketing", label: "マーケティング分析", icon: Target },
     ],
   },
@@ -7195,6 +7310,7 @@ function DataEntryView({ data, updateData, showToast }) {
         { key: "trial", label: "体験者データ" },
         { key: "join", label: "入会者データ" },
         { key: "joinSurvey", label: "入会時アンケートCSV" },
+        { key: "ltv", label: "LTVデータ" },
         { key: "milon", label: "ミロンME利用サマリー" },
         { key: "cancellation", label: "退会者CSV" },
         { key: "cancellationSurvey", label: "退会者アンケートCSV" },
@@ -7204,6 +7320,7 @@ function DataEntryView({ data, updateData, showToast }) {
       {tab === "trial" && <TrialImportPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "join" && <JoinImportPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "joinSurvey" && <JoinSurveyImportPanel data={data} updateData={updateData} showToast={showToast} />}
+      {tab === "ltv" && <LtvImportPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "milon" && <MilonUserSummaryImportPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "cancellation" && <CancellationImportPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "cancellationSurvey" && <CancellationSurveyImportPanel data={data} updateData={updateData} showToast={showToast} />}
@@ -7467,6 +7584,77 @@ function MilonUserSummaryImportPanel({ data, updateData, showToast }) {
 
 function CounselingStatLine({ label, value }) {
   return <span>{label} <b className="num">{value}</b></span>;
+}
+
+function LtvImportPanel({ data, updateData, showToast }) {
+  const [csvText, setCsvText] = useState("");
+  const [preview, setPreview] = useState(null);
+  const [fileName, setFileName] = useState("");
+  const fileRef = useRef(null);
+  const current = normalizeLtvSnapshots(data.ltvSnapshots);
+  const parseCsv = useCallback((text, name = "貼り付けCSV") => {
+    const result = Papa.parse(String(text || "").replace(/^\uFEFF/, ""), { header: true, skipEmptyLines: true });
+    if (result.errors?.length) {
+      showToast("LTV CSVの読み込みに失敗しました。", true);
+      return;
+    }
+    const parsed = parseLtvRows(result.data || []);
+    setPreview({ ...parsed, fileName: name });
+    setFileName(name);
+  }, [showToast]);
+  const handleFile = useCallback(async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setCsvText(await file.text());
+    parseCsv(await file.text(), file.name);
+  }, [parseCsv]);
+  const reductionWarning = preview && current.rows.length > 0 && preview.stats.validCount < current.rows.length * 0.7;
+  const handleSave = async () => {
+    if (!preview) return;
+    if (reductionWarning && !window.confirm(`前回保存件数（${current.rows.length}件）に対し、今回のCSVは有効行数が大幅に少なくなっています（${preview.stats.validCount}件）。ファイルが正しいか確認してください。最新CSVとして置き換えます。`)) return;
+    const importedAt = new Date().toISOString();
+    await updateData("ltvSnapshots", () => ({
+      rows: preview.rows,
+      meta: { ...preview.stats, lastImportedAt: importedAt, lastFileName: preview.fileName },
+    }));
+    showToast(`LTVデータ ${preview.stats.validCount}件を最新CSVとして保存しました`);
+    setPreview(null); setCsvText(""); setFileName("");
+    if (fileRef.current) fileRef.current.value = "";
+  };
+  return (
+    <div className="f4h-fade-in" style={{ display: "grid", gap: 16 }}>
+      <div className="f4h-card" style={{ padding: 18 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}><Banknote size={16} /><div style={{ fontWeight: 700, fontSize: 14 }}>LTVデータCSVを取り込む</div></div>
+        <p style={{ fontSize: 12.5, color: "var(--ink-faint)", margin: "2px 0 14px", lineHeight: 1.7 }}>hacomonoの「メンバー一覧（購入金額累計：LTV出力）」CSVを最新スナップショットとして保存します。新しいCSVを保存すると、以前のLTVデータは最新CSVの内容へ置き換わります。</p>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+          <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} onClick={() => fileRef.current?.click()}><Upload size={14} /> CSVファイルを選択</button>
+          <input ref={fileRef} type="file" accept=".csv,text/csv" style={{ display: "none" }} onChange={handleFile} />
+          <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} onClick={() => parseCsv(csvText, fileName || "貼り付けCSV")} disabled={!csvText.trim()}><Check size={14} /> 読み込み</button>
+          <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} onClick={() => { setCsvText(""); setPreview(null); setFileName(""); if (fileRef.current) fileRef.current.value = ""; }} disabled={!csvText && !preview}><X size={13} /> リセット</button>
+        </div>
+        <textarea className="f4h-input" rows={4} placeholder="LTV CSVの内容をここに貼り付け..." style={{ resize: "vertical", fontFamily: "monospace", fontSize: 12 }} value={csvText} onChange={(event) => setCsvText(event.target.value)} />
+        {preview && <div className="f4h-fade-in" style={{ marginTop: 16, borderTop: "1px solid var(--border-soft)", paddingTop: 14 }}>
+          <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 10 }}>
+            <CounselingStatLine label="CSV行数" value={`${preview.stats.rowCount}件`} />
+            <CounselingStatLine label="保存対象" value={`${preview.stats.validCount}件`} />
+            <CounselingStatLine label="memberId空欄除外" value={`${preview.stats.blankMemberIdCount}件`} />
+            <CounselingStatLine label="CSV内memberId重複" value={`${preview.stats.duplicateMemberIdCount}件`} />
+          </div>
+          {reductionWarning && <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--amber)", fontSize: 12.5, marginBottom: 10 }}><AlertTriangle size={14} /> 前回保存件数（{current.rows.length}件）に対し、今回の有効行数（{preview.stats.validCount}件）は30%以上少なくなっています。ファイルを確認してください。</div>}
+          <div style={{ fontSize: 11.8, color: "var(--ink-faint)", lineHeight: 1.6, marginBottom: 12 }}>氏名・メールアドレス・電話番号・住所は一覧表示・分析・AIプロンプトに使用しません。</div>
+          <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "9px 18px" }} onClick={handleSave}><Save size={15} /> 最新LTVデータとして保存</button>
+        </div>}
+      </div>
+      <div className="f4h-card" style={{ padding: 18 }}>
+        <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>保存状況</div>
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 12.5, color: "var(--ink-soft)" }}>
+          <CounselingStatLine label="保存済みLTVデータ" value={`${current.rows.length}件`} />
+          <CounselingStatLine label="最新取込ファイル" value={current.meta.lastFileName || "—"} />
+          <CounselingStatLine label="最終取込日時" value={current.meta.lastImportedAt ? new Date(current.meta.lastImportedAt).toLocaleString("ja-JP") : "—"} />
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function CounselingReservationImportPanel({ data, updateData, showToast }) {
@@ -9220,6 +9408,82 @@ function UsageAnalysisView({ data }) {
   );
 }
 
+function LtvMetricCard({ label, value }) {
+  return <div className="f4h-card" style={{ padding: 14, minHeight: 78 }}><div style={{ fontSize: 11.5, color: "var(--ink-faint)", marginBottom: 6, fontWeight: 700 }}>{label}</div><div className="num" style={{ fontSize: 21, fontWeight: 800 }}>{value}</div></div>;
+}
+function ltvMonthsText(value) {
+  return value == null ? "—" : `${Number(value).toFixed(1)}ヶ月`;
+}
+function LtvSummaryTab({ analysis }) {
+  const all = ltvMetricSummary(analysis.rows);
+  const active = ltvMetricSummary(analysis.rows.filter((row) => row.status === "在籍者"));
+  const cancelled = ltvMetricSummary(analysis.rows.filter((row) => row.status === "退会者"));
+  const unknownCount = analysis.rows.filter((row) => row.status === "不明").length;
+  return <div style={{ display: "grid", gap: 16 }}>
+    <div className="f4h-kpi-grid">
+      <LtvMetricCard label="対象人数" value={`${num(all.count)}人`} />
+      <LtvMetricCard label="LTV合計" value={yen(all.ltvTotal)} />
+      <LtvMetricCard label="平均LTV" value={yen(all.ltvAverage)} />
+      <LtvMetricCard label="中央値LTV" value={yen(all.ltvMedian)} />
+      <LtvMetricCard label="退会者数" value={`${num(cancelled.count)}人`} />
+      <LtvMetricCard label="退会者平均LTV" value={yen(cancelled.ltvAverage)} />
+      <LtvMetricCard label="退会者中央値LTV" value={yen(cancelled.ltvMedian)} />
+      <LtvMetricCard label="在籍者数" value={`${num(active.count)}人`} />
+      <LtvMetricCard label="在籍者平均LTV" value={yen(active.ltvAverage)} />
+      <LtvMetricCard label="在籍者中央値LTV" value={yen(active.ltvMedian)} />
+      <LtvMetricCard label="不明ステータス人数" value={`${num(unknownCount)}人`} />
+      <LtvMetricCard label="観測在籍月数平均" value={ltvMonthsText(all.observedMonthsAverage)} />
+      <LtvMetricCard label="月あたりLTV平均" value={yen(all.monthlyLtvAverage)} />
+    </div>
+    <div className="f4h-card" style={{ padding: 14, display: "grid", gap: 7, fontSize: 12.5, color: "var(--ink-soft)" }}>
+      <div style={{ fontWeight: 800, color: "var(--ink)" }}>除外内訳</div>
+      <div>スタッフプラン除外: <b className="num">{num(analysis.excluded.staffPlan)}件</b> / テスト氏名除外: <b className="num">{num(analysis.excluded.testName)}件</b> / 手動除外リスト該当: <b className="num">{num(analysis.excluded.manual)}件</b></div>
+      <div>手動除外リスト登録数: <b className="num">{num(analysis.manualRegisteredCount)}件</b> / memberId空欄除外: <b className="num">{num(analysis.blankMemberIdCount)}件</b> / CSV内memberId重複: <b className="num">{num(analysis.duplicateMemberIdCount)}件</b></div>
+      <div style={{ fontSize: 11.5, color: "var(--ink-faint)" }}>編集場所: 設定 &gt; LTV手動除外リスト</div>
+    </div>
+  </div>;
+}
+function LtvStoreTab({ analysis }) {
+  const stores = ["全店", ...STORE_KEYS, "不明"];
+  return <div className="f4h-card scrollbar-thin" style={{ padding: 14, overflowX: "auto" }}>
+    <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 4 }}>店舗別LTV</div>
+    <div style={{ fontSize: 11.8, color: "var(--ink-faint)", marginBottom: 10 }}>店舗はLTV CSVのメンバー所属店舗名を優先し、所属店舗名を補助として正規化した基準です。既存hacomono分析の店舗情報と一致しない場合があります。</div>
+    <table className="f4h-table"><thead><tr><th>店舗</th><th>人数</th><th>LTV合計</th><th>平均LTV</th><th>中央値LTV</th><th>退会者平均LTV</th><th>在籍者平均LTV</th><th>観測在籍月数平均</th><th>月あたりLTV平均</th></tr></thead><tbody>{stores.map((store) => {
+      const rows = store === "全店" ? analysis.rows : analysis.rows.filter((row) => row.store === store);
+      const metric = ltvMetricSummary(rows);
+      return <tr key={store}><td style={{ textAlign: "left" }}>{store}</td><td>{num(metric.count)}</td><td>{yen(metric.ltvTotal)}</td><td>{yen(metric.ltvAverage)}</td><td>{yen(metric.ltvMedian)}</td><td>{yen(ltvMetricSummary(rows.filter((row) => row.status === "退会者")).ltvAverage)}</td><td>{yen(ltvMetricSummary(rows.filter((row) => row.status === "在籍者")).ltvAverage)}</td><td>{ltvMonthsText(metric.observedMonthsAverage)}</td><td>{yen(metric.monthlyLtvAverage)}</td></tr>;
+    })}</tbody></table>
+  </div>;
+}
+function LtvTenureTab({ analysis }) {
+  const bands = ["3ヶ月以内", "4〜6ヶ月", "7〜12ヶ月", "13〜24ヶ月", "25ヶ月以上"];
+  return <div className="f4h-card scrollbar-thin" style={{ padding: 14, overflowX: "auto" }}>
+    <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 10 }}>在籍期間別LTV</div>
+    <table className="f4h-table"><thead><tr><th>観測在籍期間</th><th>人数</th><th>平均LTV</th><th>中央値LTV</th><th>月あたりLTV平均</th><th>退会者割合</th></tr></thead><tbody>{bands.map((band) => {
+      const rows = analysis.rows.filter((row) => row.tenureBand === band);
+      const metric = ltvMetricSummary(rows);
+      const cancelled = rows.filter((row) => row.status === "退会者").length;
+      return <tr key={band}><td style={{ textAlign: "left" }}>{band}</td><td>{num(metric.count)}</td><td>{yen(metric.ltvAverage)}</td><td>{yen(metric.ltvMedian)}</td><td>{yen(metric.monthlyLtvAverage)}</td><td>{pct1(metric.count ? cancelled / metric.count : null)}</td></tr>;
+    })}</tbody></table>
+  </div>;
+}
+function LtvAnalysisView({ data }) {
+  const [tab, setTab] = useState("summary");
+  const analysis = useMemo(() => buildLtvAnalysis(data), [data]);
+  if (!analysis.snapshot.rows.length) return <EmptyState icon={Banknote} title="LTVデータが未取り込みです" sub="データ入力 > LTVデータ からhacomonoのLTV CSVを取り込んでください。" />;
+  return <div className="f4h-fade-in" style={{ display: "grid", gap: 16 }}>
+    <SectionHeading eyebrow="LTV分析" title="会員LTV分析" />
+    <div className="f4h-card" style={{ padding: 14, display: "grid", gap: 8, fontSize: 12.5, color: "var(--ink-soft)", lineHeight: 1.7 }}>
+      <div>LTVはhacomonoの購入金額累計を正として使用しています。在籍者を含めた観測在籍月数は、最終的な生涯在籍期間ではなく現時点までの経過期間です。月あたりLTVは観測在籍月数1ヶ月未満の会員では算出していません。LTV金額はCSVのLTV列を使用しており、日付フィールドや契約期間から金額を再計算していません。</div>
+      <div style={{ fontSize: 11.5, color: "var(--ink-faint)" }}>最終取込: {analysis.snapshot.meta.lastImportedAt ? new Date(analysis.snapshot.meta.lastImportedAt).toLocaleString("ja-JP") : "—"} / 再入会者（在籍・退会両方に存在）: {num(analysis.activeAndCancelCount)}人は在籍者として扱います。</div>
+    </div>
+    <SubTabs tabs={[{ key: "summary", label: "LTVサマリー" }, { key: "store", label: "店舗別LTV" }, { key: "tenure", label: "在籍期間別LTV" }]} active={tab} onChange={setTab} />
+    {tab === "summary" && <LtvSummaryTab analysis={analysis} />}
+    {tab === "store" && <LtvStoreTab analysis={analysis} />}
+    {tab === "tenure" && <LtvTenureTab analysis={analysis} />}
+  </div>;
+}
+
 function ActiveCounselingProgressSection({ data, periodMode, setPeriodMode, customStartYm, setCustomStartYm, customEndYm, setCustomEndYm }) {
   const [storeFilter, setStoreFilter] = useState("all");
   const [listMode, setListMode] = useState("first");
@@ -10521,6 +10785,29 @@ function DataManagementPanel({ data, showToast, onResetAll }) {
   );
 }
 
+function LtvManualExcludeSettingsPanel({ data, updateData, showToast }) {
+  const [draft, setDraft] = useState(() => normalizeLtvManualExcludeIds(data.ltvManualExcludeIds).join("\n"));
+  useEffect(() => {
+    setDraft(normalizeLtvManualExcludeIds(data.ltvManualExcludeIds).join("\n"));
+  }, [data.ltvManualExcludeIds]);
+  const normalized = normalizeLtvManualExcludeIds(draft);
+  const save = async () => {
+    await updateData("ltvManualExcludeIds", () => normalized);
+    showToast(`LTV手動除外リストを保存しました（${normalized.length}件）`);
+  };
+  return (
+    <div className="f4h-card" style={{ padding: 18, display: "grid", gap: 12 }}>
+      <div>
+        <div style={{ fontWeight: 800, fontSize: 15 }}>LTV手動除外リスト</div>
+        <div style={{ fontSize: 12, color: "var(--ink-faint)", marginTop: 4, lineHeight: 1.6 }}>memberIdをカンマまたは改行で入力します。077と77のような数値表記ゆれは同一IDとして正規化し、LTV分析だけに反映します。</div>
+      </div>
+      <textarea className="f4h-input" rows={8} value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="728, 209, 727" style={{ resize: "vertical", fontFamily: "monospace", fontSize: 12.5 }} />
+      <div style={{ fontSize: 12, color: "var(--ink-soft)" }}>保存対象: <b className="num">{normalized.length}件</b></div>
+      <div><button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "8px 16px" }} onClick={save}><Save size={14} /> 保存</button></div>
+    </div>
+  );
+}
+
 function SettingsView({ data, updateData, showToast, onResetAll }) {
   const [tab, setTab] = useState("budget");
   return (
@@ -10528,11 +10815,12 @@ function SettingsView({ data, updateData, showToast, onResetAll }) {
       <SectionHeading eyebrow="設定" title="ダッシュボードの設定" />
       <SubTabs tabs={[
         { key: "budget", label: "予算目標" }, { key: "staff", label: "スタッフ管理" },
-        { key: "general", label: "一般設定" }, { key: "aiAssistant", label: "AI分析アシスタント" }, { key: "data", label: "データ管理" },
+        { key: "general", label: "一般設定" }, { key: "ltvExclude", label: "LTV手動除外" }, { key: "aiAssistant", label: "AI分析アシスタント" }, { key: "data", label: "データ管理" },
       ]} active={tab} onChange={setTab} />
       {tab === "budget" && <BudgetTargetsPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "staff" && <StaffPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "general" && <GeneralSettingsPanel data={data} updateData={updateData} showToast={showToast} />}
+      {tab === "ltvExclude" && <LtvManualExcludeSettingsPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "aiAssistant" && <AiAssistantSettingsPanel data={data} updateData={updateData} showToast={showToast} />}
       {tab === "data" && <DataManagementPanel data={data} showToast={showToast} onResetAll={onResetAll} />}
     </div>
@@ -10554,6 +10842,9 @@ export default function App() {
     counselingNewMembers: [],
     counselingCancelMembers: [],
     aiAssistantSettings: defaultAiAssistantSettings(),
+    milonUserSnapshots: emptyMilonUserSnapshots(),
+    ltvSnapshots: emptyLtvSnapshots(),
+    ltvManualExcludeIds: DEFAULT_LTV_MANUAL_EXCLUDE_IDS,
   }));
   const [syncing, setSyncing] = useState(true);
   const [nav, setNav] = useState("dashboard");
@@ -10612,6 +10903,8 @@ export default function App() {
       counselingCancelMembers: [],
       aiAssistantSettings: defaultAiAssistantSettings(),
       milonUserSnapshots: emptyMilonUserSnapshots(),
+      ltvSnapshots: emptyLtvSnapshots(),
+      ltvManualExcludeIds: DEFAULT_LTV_MANUAL_EXCLUDE_IDS,
     };
     await Promise.all(Object.keys(empty).map((k) => sSet(SK[k], empty[k])));
     await sSet(SK.meta, { initialized: true, seededAt: new Date().toISOString(), version: 1, resetAt: new Date().toISOString() });
@@ -10645,6 +10938,7 @@ export default function App() {
           {nav === "joinReason" && <JoinAnalysisView data={data} />}
           {nav === "counseling" && <CounselingAnalysisView data={data} updateData={updateData} showToast={showToast} onNavigate={setNav} />}
           {nav === "usage" && <UsageAnalysisView data={data} />}
+          {nav === "ltv" && <LtvAnalysisView data={data} />}
           {nav === "cvr" && <CvrAnalysisView data={data} />}
           {nav === "marketing" && (
             <React.Suspense fallback={<div style={{ padding: 24, color: "var(--ink-faint)" }}>読み込み中...</div>}>
