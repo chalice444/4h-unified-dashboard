@@ -861,6 +861,10 @@ function ltvMetricSummary(rows) {
   const monthlyValues = rows.map((row) => row.monthlyLtv).filter((value) => value != null);
   return {
     count: rows.length,
+    ltvKnownCount: ltvValues.length,
+    ltvUnknownCount: rows.length - ltvValues.length,
+    observedMonthsCount: tenureValues.length,
+    monthlyLtvCount: monthlyValues.length,
     ltvTotal: ltvValues.reduce((sum, value) => sum + value, 0),
     ltvAverage: ltvValues.length ? ltvValues.reduce((sum, value) => sum + value, 0) / ltvValues.length : null,
     ltvMedian: medianOf(ltvValues),
@@ -7621,6 +7625,11 @@ function LtvImportPanel({ data, updateData, showToast }) {
     setPreview(null); setCsvText(""); setFileName("");
     if (fileRef.current) fileRef.current.value = "";
   };
+  const handleDeleteAll = async () => {
+    if (!window.confirm("保存済みのLTVデータをすべて削除します。LTV分析の数値は表示されなくなります。この操作は元に戻せません。なお、設定画面のLTV手動除外リストは削除されません。実行しますか？")) return;
+    await updateData("ltvSnapshots", () => emptyLtvSnapshots());
+    showToast("保存済みLTVデータをすべて削除しました");
+  };
   return (
     <div className="f4h-fade-in" style={{ display: "grid", gap: 16 }}>
       <div className="f4h-card" style={{ padding: 18 }}>
@@ -7646,7 +7655,10 @@ function LtvImportPanel({ data, updateData, showToast }) {
         </div>}
       </div>
       <div className="f4h-card" style={{ padding: 18 }}>
-        <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>保存状況</div>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+          <div style={{ fontWeight: 700, fontSize: 14 }}>保存状況</div>
+          {current.rows.length > 0 && <button type="button" className="f4h-btn f4h-btn-ghost f4h-focus" style={{ padding: "7px 12px", color: "var(--red)" }} onClick={handleDeleteAll}><Trash2 size={14} /> LTVデータをすべて削除</button>}
+        </div>
         <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 12.5, color: "var(--ink-soft)" }}>
           <CounselingStatLine label="保存済みLTVデータ" value={`${current.rows.length}件`} />
           <CounselingStatLine label="最新取込ファイル" value={current.meta.lastFileName || "—"} />
@@ -9425,6 +9437,8 @@ function LtvSummaryTab({ analysis }) {
       <LtvMetricCard label="LTV合計" value={yen(all.ltvTotal)} />
       <LtvMetricCard label="平均LTV" value={yen(all.ltvAverage)} />
       <LtvMetricCard label="中央値LTV" value={yen(all.ltvMedian)} />
+      <LtvMetricCard label="LTV数値あり人数" value={`${num(all.ltvKnownCount)}人`} />
+      <LtvMetricCard label="LTV不明人数" value={`${num(all.ltvUnknownCount)}人`} />
       <LtvMetricCard label="退会者数" value={`${num(cancelled.count)}人`} />
       <LtvMetricCard label="退会者平均LTV" value={yen(cancelled.ltvAverage)} />
       <LtvMetricCard label="退会者中央値LTV" value={yen(cancelled.ltvMedian)} />
@@ -9434,6 +9448,11 @@ function LtvSummaryTab({ analysis }) {
       <LtvMetricCard label="不明ステータス人数" value={`${num(unknownCount)}人`} />
       <LtvMetricCard label="観測在籍月数平均" value={ltvMonthsText(all.observedMonthsAverage)} />
       <LtvMetricCard label="月あたりLTV平均" value={yen(all.monthlyLtvAverage)} />
+      <LtvMetricCard label="観測在籍月数算出対象" value={`${num(all.observedMonthsCount)}人`} />
+      <LtvMetricCard label="月あたりLTV算出対象" value={`${num(all.monthlyLtvCount)}人`} />
+    </div>
+    <div className="f4h-card" style={{ padding: 14, fontSize: 12.2, color: "var(--ink-soft)", lineHeight: 1.7 }}>
+      平均LTV・中央値LTVは、LTVが数値として取得できた会員のみを対象に算出しています。LTV空欄は不明として扱い、0円とは分けています。
     </div>
     <div className="f4h-card" style={{ padding: 14, display: "grid", gap: 7, fontSize: 12.5, color: "var(--ink-soft)" }}>
       <div style={{ fontWeight: 800, color: "var(--ink)" }}>除外内訳</div>
@@ -9448,17 +9467,21 @@ function LtvStoreTab({ analysis }) {
   return <div className="f4h-card scrollbar-thin" style={{ padding: 14, overflowX: "auto" }}>
     <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 4 }}>店舗別LTV</div>
     <div style={{ fontSize: 11.8, color: "var(--ink-faint)", marginBottom: 10 }}>店舗はLTV CSVのメンバー所属店舗名を優先し、所属店舗名を補助として正規化した基準です。既存hacomono分析の店舗情報と一致しない場合があります。</div>
-    <table className="f4h-table"><thead><tr><th>店舗</th><th>人数</th><th>LTV合計</th><th>平均LTV</th><th>中央値LTV</th><th>退会者平均LTV</th><th>在籍者平均LTV</th><th>観測在籍月数平均</th><th>月あたりLTV平均</th></tr></thead><tbody>{stores.map((store) => {
+    <table className="f4h-table"><thead><tr><th>店舗</th><th>人数</th><th>LTV数値あり</th><th>LTV不明</th><th>LTV合計</th><th>平均LTV</th><th>中央値LTV</th><th>退会者平均LTV</th><th>在籍者平均LTV</th><th>観測在籍月数平均</th><th>月あたりLTV平均</th><th>月あたりLTV算出対象</th></tr></thead><tbody>{stores.map((store) => {
       const rows = store === "全店" ? analysis.rows : analysis.rows.filter((row) => row.store === store);
       const metric = ltvMetricSummary(rows);
-      return <tr key={store}><td style={{ textAlign: "left" }}>{store}</td><td>{num(metric.count)}</td><td>{yen(metric.ltvTotal)}</td><td>{yen(metric.ltvAverage)}</td><td>{yen(metric.ltvMedian)}</td><td>{yen(ltvMetricSummary(rows.filter((row) => row.status === "退会者")).ltvAverage)}</td><td>{yen(ltvMetricSummary(rows.filter((row) => row.status === "在籍者")).ltvAverage)}</td><td>{ltvMonthsText(metric.observedMonthsAverage)}</td><td>{yen(metric.monthlyLtvAverage)}</td></tr>;
+      return <tr key={store}><td style={{ textAlign: "left" }}>{store}</td><td>{num(metric.count)}</td><td>{num(metric.ltvKnownCount)}</td><td>{num(metric.ltvUnknownCount)}</td><td>{yen(metric.ltvTotal)}</td><td>{yen(metric.ltvAverage)}</td><td>{yen(metric.ltvMedian)}</td><td>{yen(ltvMetricSummary(rows.filter((row) => row.status === "退会者")).ltvAverage)}</td><td>{yen(ltvMetricSummary(rows.filter((row) => row.status === "在籍者")).ltvAverage)}</td><td>{ltvMonthsText(metric.observedMonthsAverage)}</td><td>{yen(metric.monthlyLtvAverage)}</td><td>{num(metric.monthlyLtvCount)}</td></tr>;
     })}</tbody></table>
   </div>;
 }
 function LtvTenureTab({ analysis }) {
   const bands = ["3ヶ月以内", "4〜6ヶ月", "7〜12ヶ月", "13〜24ヶ月", "25ヶ月以上"];
+  const targetCount = analysis.rows.filter((row) => row.tenureBand).length;
+  const excludedCount = analysis.rows.length - targetCount;
   return <div className="f4h-card scrollbar-thin" style={{ padding: 14, overflowX: "auto" }}>
     <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 10 }}>在籍期間別LTV</div>
+    <div style={{ fontSize: 12, color: "var(--ink-soft)", lineHeight: 1.7, marginBottom: 8 }}>在籍期間別LTVは、joinDateと観測終了日から観測在籍月数を算出できた会員のみを対象にしています。不明ステータスや入会日不明の会員は含まれません。</div>
+    <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 10 }}><CounselingStatLine label="在籍期間別LTV対象人数" value={`${num(targetCount)}人`} /><CounselingStatLine label="対象外人数" value={`${num(excludedCount)}人`} /></div>
     <table className="f4h-table"><thead><tr><th>観測在籍期間</th><th>人数</th><th>平均LTV</th><th>中央値LTV</th><th>月あたりLTV平均</th><th>退会者割合</th></tr></thead><tbody>{bands.map((band) => {
       const rows = analysis.rows.filter((row) => row.tenureBand === band);
       const metric = ltvMetricSummary(rows);
