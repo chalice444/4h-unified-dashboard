@@ -933,6 +933,7 @@ function buildLtvDormancyAnalysis(data) {
   const activeMonthlyRows = activeRows.filter((row) => row.monthlyLtv != null);
   const latestSnapshotDate = usageLatestSnapshotDate(normalizeMilonUserSnapshots(data?.milonUserSnapshots).rows || []);
   const usage = latestSnapshotDate ? usageBuildRows(data, latestSnapshotDate, "all") : null;
+  const activeUsageById = new Map((usage?.active || []).map((row) => [memberIdMatchKey(row.memberId), row]).filter(([key]) => key));
   const usageById = new Map((usage?.matched || []).map((row) => [memberIdMatchKey(row.memberId), row]).filter(([key]) => key));
   const activeMilonMatchedRows = activeRows.filter((row) => usageById.has(memberIdMatchKey(row.memberId)));
   const joinedRows = activeLtvKnownRows.map((row) => {
@@ -964,6 +965,7 @@ function buildLtvDormancyAnalysis(data) {
     activeRows,
     activeLtvKnownRows,
     activeMilonMatchedRows,
+    activeUsageById,
     joinedRows,
     thresholds,
     monthlyMedian,
@@ -9556,6 +9558,10 @@ function ltvDormancySummary(rows, thresholds) {
 function LtvDormancyTab({ data }) {
   const [storeFilter, setStoreFilter] = useState("all");
   const analysis = useMemo(() => buildLtvDormancyAnalysis(data), [data]);
+  const isSelectedStore = (row) => storeFilter === "all" || analysis.activeUsageById.get(memberIdMatchKey(row.memberId))?.store === storeFilter;
+  const visibleActiveRows = useMemo(() => analysis.activeRows.filter(isSelectedStore), [analysis.activeRows, analysis.activeUsageById, storeFilter]);
+  const visibleActiveLtvKnownRows = useMemo(() => analysis.activeLtvKnownRows.filter(isSelectedStore), [analysis.activeLtvKnownRows, analysis.activeUsageById, storeFilter]);
+  const visibleActiveMilonMatchedRows = useMemo(() => analysis.activeMilonMatchedRows.filter(isSelectedStore), [analysis.activeMilonMatchedRows, analysis.activeUsageById, storeFilter]);
   const visibleRows = useMemo(() => analysis.joinedRows.filter((row) => storeFilter === "all" || row.store === storeFilter), [analysis.joinedRows, storeFilter]);
   const thresholds = analysis.thresholds;
   const riskRows = [
@@ -9604,12 +9610,12 @@ function LtvDormancyTab({ data }) {
       {STORE_KEYS.map((store) => <Pill key={store} active={storeFilter === store} onClick={() => setStoreFilter(store)}>{store}</Pill>)}
     </div>
     <div className="f4h-kpi-grid">
-      <LtvMetricCard label="在籍者数" value={`${num(analysis.activeRows.length)}人`} />
-      <LtvMetricCard label="在籍者LTV数値あり" value={`${num(analysis.activeLtvKnownRows.length)}人`} />
-      <LtvMetricCard label="在籍者LTV不明" value={`${num(analysis.activeRows.length - analysis.activeLtvKnownRows.length)}人`} />
-      <LtvMetricCard label="在籍者ミロンME照合済み" value={`${num(analysis.activeMilonMatchedRows.length)}人`} />
-      <LtvMetricCard label="在籍者ミロンME未照合" value={`${num(analysis.activeRows.length - analysis.activeMilonMatchedRows.length)}人`} />
-      <LtvMetricCard label="LTV×休眠集計対象" value={`${num(analysis.joinedRows.length)}人`} />
+      <LtvMetricCard label="在籍者数" value={`${num(visibleActiveRows.length)}人`} />
+      <LtvMetricCard label="在籍者LTV数値あり" value={`${num(visibleActiveLtvKnownRows.length)}人`} />
+      <LtvMetricCard label="在籍者LTV不明" value={`${num(visibleActiveRows.length - visibleActiveLtvKnownRows.length)}人`} />
+      <LtvMetricCard label="在籍者ミロンME照合済み" value={`${num(visibleActiveMilonMatchedRows.length)}人`} />
+      <LtvMetricCard label="在籍者ミロンME未照合" value={`${num(visibleActiveRows.length - visibleActiveMilonMatchedRows.length)}人`} />
+      <LtvMetricCard label="LTV×休眠集計対象" value={`${num(visibleRows.length)}人`} />
     </div>
     <div className="f4h-card" style={{ padding: 14, display: "grid", gap: 6, fontSize: 12.2, color: "var(--ink-soft)" }}>
       <div style={{ fontWeight: 800, color: "var(--ink)" }}>全店固定の上位しきい値</div>
