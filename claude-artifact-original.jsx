@@ -7328,6 +7328,11 @@ function MilonUserSummaryImportPanel({ data, updateData, showToast }) {
     showToast(`ミロンME利用サマリー ${preview.rows.length}件を保存しました（保存済み ${savedMeta.savedCount}件）`);
     resetPreview();
   };
+  const handleDeleteAll = async () => {
+    if (!window.confirm("保存済みのミロンME利用サマリーデータをすべて削除します。snapshotDate別の履歴もすべて削除されます。この操作は元に戻せません。削除してよろしいですか？")) return;
+    await updateData("milonUserSnapshots", () => emptyMilonUserSnapshots());
+    showToast("保存済みミロンME利用サマリーデータをすべて削除しました");
+  };
 
   return (
     <div className="f4h-fade-in" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -7410,7 +7415,14 @@ function MilonUserSummaryImportPanel({ data, updateData, showToast }) {
       </div>
 
       <div className="f4h-card" style={{ padding: 18 }}>
-        <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>保存状況・データ品質</div>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+          <div style={{ fontWeight: 700, fontSize: 14 }}>保存状況・データ品質</div>
+          {rows.length > 0 && (
+            <button type="button" className="f4h-btn f4h-btn-ghost f4h-focus" style={{ padding: "7px 12px", color: "var(--red)" }} onClick={handleDeleteAll}>
+              <Trash2 size={14} /> ミロンME利用サマリーデータをすべて削除
+            </button>
+          )}
+        </div>
         <div style={{ display: "flex", gap: 14, fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 10, flexWrap: "wrap" }}>
           <CounselingStatLine label="保存済み全スナップショット件数" value={`${rows.length}件`} />
           <CounselingStatLine label="最新snapshotDate" value={latestSnapshotDate || "—"} />
@@ -7425,6 +7437,7 @@ function MilonUserSummaryImportPanel({ data, updateData, showToast }) {
         <div style={{ fontSize: 12, color: "var(--ink-faint)", lineHeight: 1.7, marginBottom: 10 }}>
           ミロンME利用サマリーはsnapshotDateごとのスナップショットとして保存されます。snapshotDateが違う同一memberIdは履歴として保持され、同じsnapshotDate + 同じmemberIdを再取込した場合は重複追加ではなく上書きされます。通常運用ではリセット不要です。リセットは、店舗やsnapshotDateを誤って取り込んだ場合、または不良ファイルを取り込んだ場合のみ使用してください。
         </div>
+        {rows.length > 0 && <div style={{ fontSize: 11.8, color: "var(--ink-faint)", lineHeight: 1.6, marginBottom: 10 }}>通常は削除不要です。店舗・snapshotDateの誤取込、不良ファイル取込、検証データ削除時のみ使用してください。</div>}
         <div style={{ fontSize: 12, color: "var(--ink-faint)", marginBottom: 8 }}>最新取込ファイルの品質</div>
         <div style={{ display: "flex", gap: 14, fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 10, flexWrap: "wrap" }}>
           <CounselingStatLine label="ZIP空欄除外" value={`${meta.blankMemberIdCount || 0}件`} />
