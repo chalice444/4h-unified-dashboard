@@ -917,6 +917,59 @@ function buildLtvAnalysis(data) {
     activeAndCancelCount: [...activeIds].filter((id) => cancelById.has(id)).length,
   };
 }
+function ltvPercentileThreshold(values, percentile) {
+  const sorted = [...(values || [])].filter((value) => Number.isFinite(value)).sort((a, b) => a - b);
+  if (!sorted.length) return null;
+  return sorted[Math.max(0, Math.ceil(sorted.length * percentile) - 1)];
+}
+function ltvDormancyRiskLabel(row) {
+  const label = usageRiskLabel(row);
+  return label === "要確認" ? "判定不可" : label;
+}
+function buildLtvDormancyAnalysis(data) {
+  const ltv = buildLtvAnalysis(data);
+  const activeRows = ltv.rows.filter((row) => row.status === "在籍者");
+  const activeLtvKnownRows = activeRows.filter((row) => row.ltv != null);
+  const activeMonthlyRows = activeRows.filter((row) => row.monthlyLtv != null);
+  const latestSnapshotDate = usageLatestSnapshotDate(normalizeMilonUserSnapshots(data?.milonUserSnapshots).rows || []);
+  const usage = latestSnapshotDate ? usageBuildRows(data, latestSnapshotDate, "all") : null;
+  const usageById = new Map((usage?.matched || []).map((row) => [memberIdMatchKey(row.memberId), row]).filter(([key]) => key));
+  const activeMilonMatchedRows = activeRows.filter((row) => usageById.has(memberIdMatchKey(row.memberId)));
+  const joinedRows = activeLtvKnownRows.map((row) => {
+    const usageRow = usageById.get(memberIdMatchKey(row.memberId));
+    return usageRow ? {
+      ...row,
+      store: usageRow.store || "不明",
+      lastLogin: usageRow.lastLogin,
+      trLast30d: usageRow.trLast30d,
+      daysSinceLastLogin: usageRow.daysSinceLastLogin,
+      riskLabel: ltvDormancyRiskLabel(usageRow),
+    } : null;
+  }).filter(Boolean);
+  const ltvValues = activeLtvKnownRows.map((row) => row.ltv);
+  const monthlyValues = activeMonthlyRows.map((row) => row.monthlyLtv);
+  const thresholds = {
+    ltvTop25: ltvPercentileThreshold(ltvValues, 0.75),
+    ltvTop10: ltvPercentileThreshold(ltvValues, 0.9),
+    monthlyTop25: ltvPercentileThreshold(monthlyValues, 0.75),
+    monthlyTop10: ltvPercentileThreshold(monthlyValues, 0.9),
+  };
+  const monthlyMedian = medianOf(monthlyValues);
+  const monthlyExtremeCount = monthlyMedian != null && monthlyMedian > 0
+    ? activeMonthlyRows.filter((row) => row.monthlyLtv >= monthlyMedian * 10).length
+    : 0;
+  return {
+    ltv,
+    latestSnapshotDate,
+    activeRows,
+    activeLtvKnownRows,
+    activeMilonMatchedRows,
+    joinedRows,
+    thresholds,
+    monthlyMedian,
+    monthlyExtremeCount,
+  };
+}
 function normalizeStaffPlanText(value) {
   return String(value ?? "").normalize("NFKC").replace(/[　\s]/g, "").toLowerCase();
 }
@@ -9489,6 +9542,103 @@ function LtvTenureTab({ analysis }) {
     })}</tbody></table>
   </div>;
 }
+function ltvDormancySummary(rows, thresholds) {
+  const metric = ltvMetricSummary(rows);
+  const countAtLeast = (field, threshold) => threshold == null ? 0 : rows.filter((row) => row[field] != null && row[field] >= threshold).length;
+  return {
+    ...metric,
+    ltvTop25Count: countAtLeast("ltv", thresholds.ltvTop25),
+    ltvTop10Count: countAtLeast("ltv", thresholds.ltvTop10),
+    monthlyTop25Count: countAtLeast("monthlyLtv", thresholds.monthlyTop25),
+    monthlyTop10Count: countAtLeast("monthlyLtv", thresholds.monthlyTop10),
+  };
+}
+function LtvDormancyTab({ data }) {
+  const [storeFilter, setStoreFilter] = useState("all");
+  const analysis = useMemo(() => buildLtvDormancyAnalysis(data), [data]);
+  const visibleRows = useMemo(() => analysis.joinedRows.filter((row) => storeFilter === "all" || row.store === storeFilter), [analysis.joinedRows, storeFilter]);
+  const thresholds = analysis.thresholds;
+  const riskRows = [
+    ["最優先", visibleRows.filter((row) => row.riskLabel === "最優先")],
+    ["次点（14〜29日未利用）", visibleRows.filter((row) => row.riskLabel === "次点（14〜29日未利用）")],
+    ["要観察", visibleRows.filter((row) => row.riskLabel === "要観察")],
+    ["通常", visibleRows.filter((row) => row.riskLabel === "通常")],
+    ["判定不可", visibleRows.filter((row) => row.riskLabel === "判定不可")],
+  ];
+  const utilizationRows = [
+    ["直近30日0回", visibleRows.filter((row) => row.trLast30d === 0)],
+    ["直近30日1回", visibleRows.filter((row) => row.trLast30d === 1)],
+    ["最終利用14日以上", visibleRows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14)],
+    ["最終利用30日以上", visibleRows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 30)],
+    ["最終利用60日以上", visibleRows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 60)],
+    ["LASTLOGINなし", visibleRows.filter((row) => !row.lastLogin)],
+    ["TR_LAST30D不明", visibleRows.filter((row) => row.trLast30d == null)],
+  ];
+  const highLtvRows = [
+    ["LTV上位25% × 最優先", visibleRows.filter((row) => row.riskLabel === "最優先" && thresholds.ltvTop25 != null && row.ltv >= thresholds.ltvTop25)],
+    ["LTV上位25% × 最終利用30日以上", visibleRows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 30 && thresholds.ltvTop25 != null && row.ltv >= thresholds.ltvTop25)],
+    ["LTV上位25% × 直近30日0回", visibleRows.filter((row) => row.trLast30d === 0 && thresholds.ltvTop25 != null && row.ltv >= thresholds.ltvTop25)],
+    ["LTV上位10% × 最優先", visibleRows.filter((row) => row.riskLabel === "最優先" && thresholds.ltvTop10 != null && row.ltv >= thresholds.ltvTop10)],
+    ["LTV上位10% × 最終利用30日以上", visibleRows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 30 && thresholds.ltvTop10 != null && row.ltv >= thresholds.ltvTop10)],
+    ["LTV上位10% × 直近30日0回", visibleRows.filter((row) => row.trLast30d === 0 && thresholds.ltvTop10 != null && row.ltv >= thresholds.ltvTop10)],
+  ];
+  const highMonthlyRows = [
+    ["月あたりLTV上位25% × 最優先", visibleRows.filter((row) => row.riskLabel === "最優先" && thresholds.monthlyTop25 != null && row.monthlyLtv != null && row.monthlyLtv >= thresholds.monthlyTop25)],
+    ["月あたりLTV上位25% × 最終利用30日以上", visibleRows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 30 && thresholds.monthlyTop25 != null && row.monthlyLtv != null && row.monthlyLtv >= thresholds.monthlyTop25)],
+    ["月あたりLTV上位25% × 直近30日0回", visibleRows.filter((row) => row.trLast30d === 0 && thresholds.monthlyTop25 != null && row.monthlyLtv != null && row.monthlyLtv >= thresholds.monthlyTop25)],
+    ["月あたりLTV上位10% × 最優先", visibleRows.filter((row) => row.riskLabel === "最優先" && thresholds.monthlyTop10 != null && row.monthlyLtv != null && row.monthlyLtv >= thresholds.monthlyTop10)],
+    ["月あたりLTV上位10% × 最終利用30日以上", visibleRows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 30 && thresholds.monthlyTop10 != null && row.monthlyLtv != null && row.monthlyLtv >= thresholds.monthlyTop10)],
+    ["月あたりLTV上位10% × 直近30日0回", visibleRows.filter((row) => row.trLast30d === 0 && thresholds.monthlyTop10 != null && row.monthlyLtv != null && row.monthlyLtv >= thresholds.monthlyTop10)],
+  ];
+  const renderMetricRow = ([label, rows]) => {
+    const metric = ltvDormancySummary(rows, thresholds);
+    return <tr key={label}><td style={{ textAlign: "left" }}>{label}</td><td>{num(metric.count)}</td><td>{yen(metric.ltvTotal)}</td><td>{yen(metric.ltvAverage)}</td><td>{yen(metric.ltvMedian)}</td><td>{yen(metric.monthlyLtvAverage)}</td><td>{num(metric.ltvTop25Count)}</td><td>{num(metric.ltvTop10Count)}</td></tr>;
+  };
+  return <div style={{ display: "grid", gap: 16 }}>
+    <div className="f4h-card" style={{ padding: 14, display: "grid", gap: 8, fontSize: 12.4, color: "var(--ink-soft)", lineHeight: 1.7 }}>
+      <div>LTV数値ありの在籍者と、ミロンME最新スナップショットで照合できた在籍者を対象に、利用低下の傾向を集約表示します。個人名・memberId・個別明細は表示しません。</div>
+      <div style={{ fontSize: 11.5, color: "var(--ink-faint)" }}>使用するミロンME snapshotDate: {analysis.latestSnapshotDate || "—"}。店舗は利用分析と同じくHacomono在籍者の所属店舗を優先します。</div>
+    </div>
+    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+      <Pill active={storeFilter === "all"} onClick={() => setStoreFilter("all")}>全店</Pill>
+      {STORE_KEYS.map((store) => <Pill key={store} active={storeFilter === store} onClick={() => setStoreFilter(store)}>{store}</Pill>)}
+    </div>
+    <div className="f4h-kpi-grid">
+      <LtvMetricCard label="在籍者数" value={`${num(analysis.activeRows.length)}人`} />
+      <LtvMetricCard label="在籍者LTV数値あり" value={`${num(analysis.activeLtvKnownRows.length)}人`} />
+      <LtvMetricCard label="在籍者LTV不明" value={`${num(analysis.activeRows.length - analysis.activeLtvKnownRows.length)}人`} />
+      <LtvMetricCard label="在籍者ミロンME照合済み" value={`${num(analysis.activeMilonMatchedRows.length)}人`} />
+      <LtvMetricCard label="在籍者ミロンME未照合" value={`${num(analysis.activeRows.length - analysis.activeMilonMatchedRows.length)}人`} />
+      <LtvMetricCard label="LTV×休眠集計対象" value={`${num(analysis.joinedRows.length)}人`} />
+    </div>
+    <div className="f4h-card" style={{ padding: 14, display: "grid", gap: 6, fontSize: 12.2, color: "var(--ink-soft)" }}>
+      <div style={{ fontWeight: 800, color: "var(--ink)" }}>全店固定の上位しきい値</div>
+      <div>LTV上位25%: <b className="num">{yen(thresholds.ltvTop25)}</b> / 上位10%: <b className="num">{yen(thresholds.ltvTop10)}</b></div>
+      <div>月あたりLTV上位25%: <b className="num">{yen(thresholds.monthlyTop25)}</b> / 上位10%: <b className="num">{yen(thresholds.monthlyTop10)}</b></div>
+      <div style={{ fontSize: 11.5, color: "var(--ink-faint)" }}>しきい値は全店の在籍者LTV数値あり母集団から算出し、店舗フィルターを切り替えても固定です。同額が並ぶ場合は、上位対象人数が厳密な25%・10%を上回ることがあります。</div>
+    </div>
+    <div className="f4h-card scrollbar-thin" style={{ padding: 14, overflowX: "auto" }}>
+      <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 10 }}>利用リスク区分別LTV</div>
+      <table className="f4h-table"><thead><tr><th>利用リスク区分</th><th>人数</th><th>LTV合計</th><th>平均LTV</th><th>中央値LTV</th><th>月あたりLTV平均</th><th>LTV上位25%</th><th>LTV上位10%</th></tr></thead><tbody>{riskRows.map(renderMetricRow)}</tbody></table>
+    </div>
+    <div className="f4h-card scrollbar-thin" style={{ padding: 14, overflowX: "auto" }}>
+      <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 4 }}>利用状況別LTV</div>
+      <div style={{ fontSize: 11.5, color: "var(--ink-faint)", marginBottom: 10 }}>この表の区分は重複します。たとえば最終利用60日以上は、30日以上・14日以上にも含まれます。</div>
+      <table className="f4h-table"><thead><tr><th>利用状況</th><th>人数</th><th>LTV合計</th><th>平均LTV</th><th>中央値LTV</th><th>月あたりLTV平均</th><th>LTV上位25%</th><th>LTV上位10%</th></tr></thead><tbody>{utilizationRows.map(renderMetricRow)}</tbody></table>
+    </div>
+    <div className="f4h-card scrollbar-thin" style={{ padding: 14, overflowX: "auto" }}>
+      <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 10 }}>高LTV × 休眠リスク</div>
+      <table className="f4h-table"><thead><tr><th>条件</th><th>人数</th><th>LTV合計</th><th>平均LTV</th><th>中央値LTV</th><th>月あたりLTV平均</th><th>LTV上位25%</th><th>LTV上位10%</th></tr></thead><tbody>{highLtvRows.map(renderMetricRow)}</tbody></table>
+    </div>
+    <div className="f4h-card scrollbar-thin" style={{ padding: 14, overflowX: "auto" }}>
+      <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 10 }}>月あたりLTV × 休眠リスク</div>
+      <table className="f4h-table"><thead><tr><th>条件</th><th>人数</th><th>LTV合計</th><th>平均LTV</th><th>中央値LTV</th><th>月あたりLTV平均</th><th>LTV上位25%</th><th>LTV上位10%</th></tr></thead><tbody>{highMonthlyRows.map(renderMetricRow)}</tbody></table>
+    </div>
+    <div className="f4h-card" style={{ padding: 14, fontSize: 12.1, color: "var(--ink-soft)", lineHeight: 1.7 }}>
+      月あたりLTVは観測在籍月数が1ヶ月以上の会員だけで算出し、1ヶ月未満は算出不可のまま除外しています。再入会や観測期間の短さにより極端値が生じる可能性があるため補正・除外は行わず、全店在籍者の月あたりLTV中央値の10倍以上となる集約上の極端値候補は <b className="num">{num(analysis.monthlyExtremeCount)}人</b> です。LTV側とミロンME側で店舗情報が異なる場合は、利用分析と同じHacomono在籍者側の店舗を優先しています。
+    </div>
+  </div>;
+}
 function LtvAnalysisView({ data }) {
   const [tab, setTab] = useState("summary");
   const analysis = useMemo(() => buildLtvAnalysis(data), [data]);
@@ -9499,10 +9649,11 @@ function LtvAnalysisView({ data }) {
       <div>LTVはhacomonoの購入金額累計を正として使用しています。在籍者を含めた観測在籍月数は、最終的な生涯在籍期間ではなく現時点までの経過期間です。月あたりLTVは観測在籍月数1ヶ月未満の会員では算出していません。LTV金額はCSVのLTV列を使用しており、日付フィールドや契約期間から金額を再計算していません。</div>
       <div style={{ fontSize: 11.5, color: "var(--ink-faint)" }}>最終取込: {analysis.snapshot.meta.lastImportedAt ? new Date(analysis.snapshot.meta.lastImportedAt).toLocaleString("ja-JP") : "—"} / 再入会者（在籍・退会両方に存在）: {num(analysis.activeAndCancelCount)}人は在籍者として扱います。</div>
     </div>
-    <SubTabs tabs={[{ key: "summary", label: "LTVサマリー" }, { key: "store", label: "店舗別LTV" }, { key: "tenure", label: "在籍期間別LTV" }]} active={tab} onChange={setTab} />
+    <SubTabs tabs={[{ key: "summary", label: "LTVサマリー" }, { key: "store", label: "店舗別LTV" }, { key: "tenure", label: "在籍期間別LTV" }, { key: "dormancy", label: "LTV×休眠" }]} active={tab} onChange={setTab} />
     {tab === "summary" && <LtvSummaryTab analysis={analysis} />}
     {tab === "store" && <LtvStoreTab analysis={analysis} />}
     {tab === "tenure" && <LtvTenureTab analysis={analysis} />}
+    {tab === "dormancy" && <LtvDormancyTab data={data} />}
   </div>;
 }
 
