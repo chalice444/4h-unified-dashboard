@@ -8729,7 +8729,122 @@ function usageCancelLastUseLabel(row) {
   if (row.lastLoginGapDays >= 60) return "長期休眠後退会";
   return "休眠後退会";
 }
-function UsageRiskFilter({ options, active, onChange }) {
+const USAGE_MEMBER_SORT_OPTIONS = [
+  { key: "riskHigh", label: "リスク高い順" },
+  { key: "riskLow", label: "リスク低い順" },
+  { key: "lastLoginDesc", label: "最終利用から多い順" },
+  { key: "lastLoginAsc", label: "最終利用から少ない順" },
+  { key: "trLast30dAsc", label: "直近30日利用回数 少ない順" },
+  { key: "trLast30dDesc", label: "直近30日利用回数 多い順" },
+  { key: "daysSinceJoinDesc", label: "入会経過日数 長い順" },
+  { key: "daysSinceJoinAsc", label: "入会経過日数 短い順" },
+  { key: "memberIdAsc", label: "memberId 昇順" },
+  { key: "memberIdDesc", label: "memberId 降順" },
+];
+const USAGE_CANCEL_SORT_OPTIONS = [
+  { key: "riskHigh", label: "リスク高い順" },
+  { key: "riskLow", label: "リスク低い順" },
+  { key: "gapDesc", label: "空白日数 多い順" },
+  { key: "gapAsc", label: "空白日数 少ない順" },
+  { key: "cancelDateDesc", label: "退会日 新しい順" },
+  { key: "cancelDateAsc", label: "退会日 古い順" },
+  { key: "trLast30dAsc", label: "TR_LAST30D 少ない順" },
+  { key: "trLast30dDesc", label: "TR_LAST30D 多い順" },
+  { key: "memberIdAsc", label: "memberId 昇順" },
+  { key: "memberIdDesc", label: "memberId 降順" },
+];
+function usageRiskRank(label) {
+  const ranks = {
+    "最優先": 0,
+    "高リスク": 1,
+    "次点（14〜29日未利用）": 2,
+    "次点": 2,
+    "中リスク": 3,
+    "要観察": 4,
+    "カウンセリング要確認": 5,
+    "通常": 6,
+    "対象": 6,
+    "対象外": 6,
+    "超長期休眠後退会": 0,
+    "長期休眠後退会": 1,
+    "休眠後退会": 2,
+    "退会前に利用低下": 3,
+    "14日以内": 4,
+    "退会直前まで利用": 5,
+    "LASTLOGINなし": 6,
+    "退会日後LASTLOGIN": 7,
+    "算出不可": 8,
+    "ミロン未照合": 8,
+    "退会日不明": 8,
+    "要確認": 8,
+  };
+  return ranks[label] ?? 9;
+}
+function usageMemberIdSort(left, right) {
+  const leftKey = memberIdMatchKey(left?.memberId);
+  const rightKey = memberIdMatchKey(right?.memberId);
+  const leftNumber = /^\d+$/.test(leftKey) ? Number(leftKey) : null;
+  const rightNumber = /^\d+$/.test(rightKey) ? Number(rightKey) : null;
+  if (leftNumber != null && rightNumber != null && leftNumber !== rightNumber) return leftNumber - rightNumber;
+  if (leftNumber != null && rightNumber == null) return -1;
+  if (leftNumber == null && rightNumber != null) return 1;
+  return leftKey.localeCompare(rightKey, "ja", { numeric: true });
+}
+function usageComparableNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+function usageCompareNumber(left, right, direction) {
+  const leftValue = usageComparableNumber(left);
+  const rightValue = usageComparableNumber(right);
+  if (leftValue == null && rightValue == null) return 0;
+  if (leftValue == null) return 1;
+  if (rightValue == null) return -1;
+  return direction * (leftValue - rightValue);
+}
+function usageCompareDate(left, right, direction) {
+  const leftValue = parseFlexibleDate(left);
+  const rightValue = parseFlexibleDate(right);
+  if (!leftValue && !rightValue) return 0;
+  if (!leftValue) return 1;
+  if (!rightValue) return -1;
+  return direction * leftValue.localeCompare(rightValue);
+}
+function sortUsageRows(rows, sortKey, riskLabel) {
+  return [...rows].sort((left, right) => {
+    let result = 0;
+    if (sortKey === "riskHigh" || sortKey === "riskLow") {
+      result = usageRiskRank(riskLabel(left)) - usageRiskRank(riskLabel(right));
+      if (sortKey === "riskLow") result *= -1;
+      if (result === 0) result = usageCompareNumber(left.daysSinceLastLogin, right.daysSinceLastLogin, -1);
+    } else if (sortKey === "lastLoginDesc") {
+      result = usageCompareNumber(left.daysSinceLastLogin, right.daysSinceLastLogin, -1);
+    } else if (sortKey === "lastLoginAsc") {
+      result = usageCompareNumber(left.daysSinceLastLogin, right.daysSinceLastLogin, 1);
+    } else if (sortKey === "trLast30dAsc") {
+      result = usageCompareNumber(left.trLast30d, right.trLast30d, 1);
+    } else if (sortKey === "trLast30dDesc") {
+      result = usageCompareNumber(left.trLast30d, right.trLast30d, -1);
+    } else if (sortKey === "daysSinceJoinDesc") {
+      result = usageCompareNumber(left.daysSinceJoin, right.daysSinceJoin, -1);
+    } else if (sortKey === "daysSinceJoinAsc") {
+      result = usageCompareNumber(left.daysSinceJoin, right.daysSinceJoin, 1);
+    } else if (sortKey === "gapDesc" || sortKey === "gapAsc") {
+      const leftGap = left.lastLoginGapDays >= 0 ? left.lastLoginGapDays : null;
+      const rightGap = right.lastLoginGapDays >= 0 ? right.lastLoginGapDays : null;
+      result = usageCompareNumber(leftGap, rightGap, sortKey === "gapDesc" ? -1 : 1);
+    } else if (sortKey === "cancelDateDesc") {
+      result = usageCompareDate(left.cancelDate, right.cancelDate, -1);
+    } else if (sortKey === "cancelDateAsc") {
+      result = usageCompareDate(left.cancelDate, right.cancelDate, 1);
+    } else if (sortKey === "memberIdDesc") {
+      result = -usageMemberIdSort(left, right);
+    } else {
+      result = usageMemberIdSort(left, right);
+    }
+    return result || usageMemberIdSort(left, right);
+  });
+}
+function UsageRiskFilter({ options, active, onChange, sortOptions, sortKey, onSortChange }) {
   return (
     <div className="f4h-card" style={{ padding: 12, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
       <span style={{ fontSize: 12, color: "var(--ink-soft)", fontWeight: 700 }}>一覧フィルター</span>
@@ -8738,6 +8853,11 @@ function UsageRiskFilter({ options, active, onChange }) {
           {option.label} {num(option.count)}人
         </Pill>
       ))}
+      {sortOptions && <label style={{ display: "inline-flex", alignItems: "center", gap: 6, marginLeft: "auto", fontSize: 12, color: "var(--ink-soft)", fontWeight: 700 }}>並び替え
+        <select className="f4h-input" style={{ minWidth: 190, padding: "6px 9px" }} value={sortKey} onChange={(event) => onSortChange(event.target.value)}>
+          {sortOptions.map((option) => <option key={option.key} value={option.key}>{option.label}</option>)}
+        </select>
+      </label>}
     </div>
   );
 }
@@ -8820,6 +8940,7 @@ function UsageInitialRetentionTab({ usage }) {
   const counselingIncompleteOver14 = rows.filter((row) => row.checkedStage < 4 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14).length;
   const { highRisk, mediumRisk, watch, counselingCheck } = usageEarlyRiskBuckets(rows);
   const [riskFilter, setRiskFilter] = useState("all");
+  const [sortKey, setSortKey] = useState("riskHigh");
   const riskFilterOptions = [
     { key: "all", label: "全件", count: rows.length },
     { key: "high", label: "高リスク", count: highRisk.length },
@@ -8832,6 +8953,7 @@ function UsageInitialRetentionTab({ usage }) {
     : riskFilter === "watch" ? watch
     : riskFilter === "counseling" ? counselingCheck
     : rows;
+  const sortedTableRows = sortUsageRows(usageUniqueRows(tableRows), sortKey, usageEarlyRiskLabel);
   return (
     <div style={{ display: "grid", gap: 16 }}>
       <div className="f4h-kpi-grid">
@@ -8851,8 +8973,8 @@ function UsageInitialRetentionTab({ usage }) {
         <UsageKpiCard label="要観察" value={`${num(watch.length)}人`} />
         <UsageKpiCard label="カウンセリング未完了×14日以上" value={`${num(counselingIncompleteOver14)}人`} />
       </div>
-      <UsageRiskFilter options={riskFilterOptions} active={riskFilter} onChange={setRiskFilter} />
-      <UsageMemberTable rows={usageUniqueRows(tableRows)} riskLabel={usageEarlyRiskLabel} />
+      <UsageRiskFilter options={riskFilterOptions} active={riskFilter} onChange={setRiskFilter} sortOptions={USAGE_MEMBER_SORT_OPTIONS} sortKey={sortKey} onSortChange={setSortKey} />
+      <UsageMemberTable rows={sortedTableRows} riskLabel={usageEarlyRiskLabel} />
     </div>
   );
 }
@@ -8865,6 +8987,7 @@ function UsageMidRetentionTab({ usage }) {
   const counselingIncompleteOver14 = rows.filter((row) => row.checkedStage < 4 && row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14).length;
   const { highRisk, mediumRisk, watch, counselingCheck } = usageMidRiskBuckets(rows);
   const [riskFilter, setRiskFilter] = useState("all");
+  const [sortKey, setSortKey] = useState("riskHigh");
   const riskFilterOptions = [
     { key: "all", label: "全件", count: rows.length },
     { key: "high", label: "高リスク", count: highRisk.length },
@@ -8877,6 +9000,7 @@ function UsageMidRetentionTab({ usage }) {
     : riskFilter === "watch" ? watch
     : riskFilter === "counseling" ? counselingCheck
     : rows;
+  const sortedTableRows = sortUsageRows(usageUniqueRows(tableRows), sortKey, usageMidRiskLabel);
   return (
     <div style={{ display: "grid", gap: 16 }}>
       <div className="f4h-card" style={{ padding: 14, background: "var(--surface-soft)", fontSize: 12.5, color: "var(--ink-soft)", lineHeight: 1.7 }}>
@@ -8899,8 +9023,8 @@ function UsageMidRetentionTab({ usage }) {
         <UsageKpiCard label="要観察" value={`${num(watch.length)}人`} />
         <UsageKpiCard label="カウンセリング要確認" value={`${num(counselingCheck.length)}人`} />
       </div>
-      <UsageRiskFilter options={riskFilterOptions} active={riskFilter} onChange={setRiskFilter} />
-      <UsageMemberTable rows={usageUniqueRows(tableRows)} riskLabel={usageMidRiskLabel} />
+      <UsageRiskFilter options={riskFilterOptions} active={riskFilter} onChange={setRiskFilter} sortOptions={USAGE_MEMBER_SORT_OPTIONS} sortKey={sortKey} onSortChange={setSortKey} />
+      <UsageMemberTable rows={sortedTableRows} riskLabel={usageMidRiskLabel} />
     </div>
   );
 }
@@ -8911,6 +9035,7 @@ function UsageDormantTab({ usage }) {
   const second = rows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14 && row.daysSinceLastLogin < 30);
   const watch = rows.filter((row) => row.trLast30d === 1);
   const [riskFilter, setRiskFilter] = useState("all");
+  const [sortKey, setSortKey] = useState("riskHigh");
   const riskFilterOptions = [
     { key: "all", label: "全件", count: rows.length },
     { key: "top", label: "最優先", count: top.length },
@@ -8921,6 +9046,7 @@ function UsageDormantTab({ usage }) {
     : riskFilter === "second" ? second
     : riskFilter === "watch" ? watch
     : rows;
+  const sortedTableRows = sortUsageRows(usageUniqueRows(tableRows), sortKey, usageRiskLabel);
   return (
     <div style={{ display: "grid", gap: 16 }}>
       <div className="f4h-kpi-grid">
@@ -8936,8 +9062,8 @@ function UsageDormantTab({ usage }) {
         <UsageKpiCard label="次点（14〜29日未利用）" value={`${num(second.length)}人`} tone="amber" />
         <UsageKpiCard label="要観察" value={`${num(watch.length)}人`} />
       </div>
-      <UsageRiskFilter options={riskFilterOptions} active={riskFilter} onChange={setRiskFilter} />
-      <UsageMemberTable rows={usageUniqueRows(tableRows)} />
+      <UsageRiskFilter options={riskFilterOptions} active={riskFilter} onChange={setRiskFilter} sortOptions={USAGE_MEMBER_SORT_OPTIONS} sortKey={sortKey} onSortChange={setSortKey} />
+      <UsageMemberTable rows={sortedTableRows} />
     </div>
   );
 }
@@ -8984,6 +9110,7 @@ function UsageCancelLastUseTab({ usage }) {
   const avgGap = gapValues.length ? gapValues.reduce((sum, value) => sum + value, 0) / gapValues.length : null;
   const medianGap = medianOf(gapValues);
   const [riskFilter, setRiskFilter] = useState("all");
+  const [sortKey, setSortKey] = useState("gapDesc");
   const riskFilterOptions = [
     { key: "all", label: "全件", count: rows.length },
     { key: "used", label: "退会直前まで利用", count: within7.length },
@@ -9000,6 +9127,7 @@ function UsageCancelLastUseTab({ usage }) {
     : riskFilter === "noLastLogin" ? noLastLogin
     : riskFilter === "afterCancel" ? afterCancel
     : rows;
+  const sortedTableRows = sortUsageRows(tableRows, sortKey, usageCancelLastUseLabel);
   return (
     <div style={{ display: "grid", gap: 16 }}>
       <div className="f4h-card" style={{ padding: 14, background: "var(--surface-soft)", fontSize: 12.5, color: "var(--ink-soft)", lineHeight: 1.7 }}>
@@ -9022,8 +9150,8 @@ function UsageCancelLastUseTab({ usage }) {
         <UsageKpiCard label="退会日後LASTLOGIN" value={`${num(afterCancel.length)}人`} />
         <UsageKpiCard label="退会日不明" value={`${num(noCancelDate.length)}人`} />
       </div>
-      <UsageRiskFilter options={riskFilterOptions} active={riskFilter} onChange={setRiskFilter} />
-      <UsageCancelLastUseTable rows={tableRows} />
+      <UsageRiskFilter options={riskFilterOptions} active={riskFilter} onChange={setRiskFilter} sortOptions={USAGE_CANCEL_SORT_OPTIONS} sortKey={sortKey} onSortChange={setSortKey} />
+      <UsageCancelLastUseTable rows={sortedTableRows} />
     </div>
   );
 }
