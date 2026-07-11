@@ -7230,6 +7230,30 @@ function MilonUserSummaryImportPanel({ data, updateData, showToast }) {
     .map((row) => row.memberId)
     .slice(0, 10), [rows, activeMemberIds]);
   const matchRate = rows.length && activeMemberIds.size ? matchedCount / rows.length : null;
+  const snapshotSummary = useMemo(() => {
+    const counts = new Map();
+    for (const row of rows) {
+      const date = String(row.snapshotDate || "").trim();
+      if (!date) continue;
+      counts.set(date, (counts.get(date) || 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([date, count]) => ({ date, count }))
+      .sort((a, b) => b.date.localeCompare(a.date));
+  }, [rows]);
+  const latestSnapshotDate = snapshotSummary[0]?.date || "";
+  const latestSnapshotCount = snapshotSummary[0]?.count || 0;
+  const latestStoreSummary = useMemo(() => {
+    const counts = new Map();
+    for (const row of rows) {
+      if (row.snapshotDate !== latestSnapshotDate) continue;
+      const storeName = String(row.store || "").trim() || "店舗不明";
+      counts.set(storeName, (counts.get(storeName) || 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([storeName, count]) => ({ storeName, count }))
+      .sort((a, b) => a.storeName.localeCompare(b.storeName, "ja"));
+  }, [rows, latestSnapshotDate]);
 
   const resetPreview = () => {
     setPreview(null);
@@ -7388,9 +7412,21 @@ function MilonUserSummaryImportPanel({ data, updateData, showToast }) {
       <div className="f4h-card" style={{ padding: 18 }}>
         <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>保存状況・データ品質</div>
         <div style={{ display: "flex", gap: 14, fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 10, flexWrap: "wrap" }}>
-          <CounselingStatLine label="保存済みミロンME利用サマリー" value={`${rows.length}件`} />
-          <CounselingStatLine label="最新データ基準日" value={meta.lastSnapshotDate || "—"} />
-          <CounselingStatLine label="対象店舗" value={meta.lastStore || "—"} />
+          <CounselingStatLine label="保存済み全スナップショット件数" value={`${rows.length}件`} />
+          <CounselingStatLine label="最新snapshotDate" value={latestSnapshotDate || "—"} />
+          <CounselingStatLine label="最新snapshotDate件数" value={`${latestSnapshotCount}件`} />
+          <CounselingStatLine label="最新取込対象店舗" value={meta.lastStore || "—"} />
+        </div>
+        <div style={{ display: "grid", gap: 6, padding: "10px 12px", marginBottom: 10, borderRadius: 6, background: "var(--surface-soft)", fontSize: 12.2, color: "var(--ink-soft)", lineHeight: 1.6 }}>
+          <div><b>snapshotDate別件数（直近5件）</b>: {snapshotSummary.length ? snapshotSummary.slice(0, 5).map((item) => `${item.date}: ${num(item.count)}件`).join(" / ") : "—"}</div>
+          <div><b>最新snapshotDate 店舗別件数（取込時の対象店舗基準）</b>: {latestStoreSummary.length ? latestStoreSummary.map((item) => `${item.storeName}: ${num(item.count)}件`).join(" / ") : "—"}</div>
+          <div style={{ fontSize: 11.6, color: "var(--ink-faint)" }}>店舗別件数は、保存データの取込時対象店舗（milon store / importedStore）で集計しています。hacomono側の所属店舗とは一部一致しない場合があります。</div>
+        </div>
+        <div style={{ fontSize: 12, color: "var(--ink-faint)", lineHeight: 1.7, marginBottom: 10 }}>
+          ミロンME利用サマリーはsnapshotDateごとのスナップショットとして保存されます。snapshotDateが違う同一memberIdは履歴として保持され、同じsnapshotDate + 同じmemberIdを再取込した場合は重複追加ではなく上書きされます。通常運用ではリセット不要です。リセットは、店舗やsnapshotDateを誤って取り込んだ場合、または不良ファイルを取り込んだ場合のみ使用してください。
+        </div>
+        <div style={{ fontSize: 12, color: "var(--ink-faint)", marginBottom: 8 }}>最新取込ファイルの品質</div>
+        <div style={{ display: "flex", gap: 14, fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 10, flexWrap: "wrap" }}>
           <CounselingStatLine label="ZIP空欄除外" value={`${meta.blankMemberIdCount || 0}件`} />
           <CounselingStatLine label="ZIP重複除外" value={`${meta.duplicateMemberIdCount || 0}件`} />
           <CounselingStatLine label="LASTLOGIN空欄" value={`${meta.lastLoginBlankCount || 0}件`} />
@@ -7402,6 +7438,9 @@ function MilonUserSummaryImportPanel({ data, updateData, showToast }) {
         </div>
         <div style={{ fontSize: 11.8, color: "var(--ink-faint)", lineHeight: 1.6 }}>
           照合率は保存済みのカウンセリング進捗用在籍者データとの単純memberId照合です。個人名・メール・電話番号・住所は表示しません。
+        </div>
+        <div style={{ marginTop: 6, fontSize: 11.8, color: "var(--ink-faint)", lineHeight: 1.6 }}>
+          未照合memberIdは、保存済みのカウンセリング進捗用在籍者データとの単純照合結果です。ミロンME側には過去会員・退会者・別店舗由来のデータが含まれる可能性があるため、未照合が存在すること自体は異常とは限りません。
         </div>
         {unmatchedSamples.length > 0 && (
           <div style={{ marginTop: 10, fontSize: 12.5, color: "var(--ink-soft)" }}>
