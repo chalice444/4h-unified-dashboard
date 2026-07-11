@@ -3371,6 +3371,75 @@ function buildAiUsageAnalysisSummary(data) {
     "- 数値根拠が弱い施策や個人単位の対応リスト作成は避け、既存オペレーション内で検証可能な施策に限定してください。",
   ].join("\n");
 }
+function aiLtvDormancyMetricLine(label, rows, thresholds) {
+  const metric = ltvDormancySummary(rows, thresholds);
+  return `- ${label}: ${num(metric.count)}人 / LTV合計 ${yen(metric.ltvTotal)} / 平均LTV ${yen(metric.ltvAverage)} / 中央値LTV ${yen(metric.ltvMedian)} / 月あたりLTV平均 ${yen(metric.monthlyLtvAverage)} / LTV上位25% ${num(metric.ltvTop25Count)}人 / LTV上位10% ${num(metric.ltvTop10Count)}人`;
+}
+function buildAiLtvDormancySummary(data) {
+  const analysis = buildLtvDormancyAnalysis(data || {});
+  if (!analysis.ltv.snapshot.rows.length) return "LTV×休眠分析: 未集計 / LTVデータ未取込";
+  const tables = buildLtvDormancyMetricTables(analysis.joinedRows, analysis.thresholds);
+  const groups = tables.groups;
+  const priority = ltvMetricSummary(groups.topPriority);
+  const highPriority = ltvMetricSummary(groups.topLtvPriority);
+  const focus = ltvMetricSummary(groups.focusRows);
+  const stores = buildLtvDormancyStoreComparison(analysis);
+  return [
+    "データ品質:",
+    `- LTV×休眠集計対象: ${num(analysis.joinedRows.length)}人`,
+    `- 在籍者: ${num(analysis.activeRows.length)}人`,
+    `- 在籍者LTV数値あり: ${num(analysis.activeLtvKnownRows.length)}人`,
+    `- 在籍者LTV不明: ${num(analysis.activeRows.length - analysis.activeLtvKnownRows.length)}人`,
+    `- 在籍者ミロンME照合済み: ${num(analysis.activeMilonMatchedRows.length)}人`,
+    `- 在籍者ミロンME未照合: ${num(analysis.activeRows.length - analysis.activeMilonMatchedRows.length)}人`,
+    `- 使用snapshotDate: ${analysis.latestSnapshotDate || "未取込"}`,
+    "",
+    "全店固定しきい値:",
+    `- LTV上位25%: ${yen(analysis.thresholds.ltvTop25)}以上`,
+    `- LTV上位10%: ${yen(analysis.thresholds.ltvTop10)}以上`,
+    `- 月あたりLTV上位25%: ${yen(analysis.thresholds.monthlyTop25)}以上`,
+    `- 月あたりLTV上位10%: ${yen(analysis.thresholds.monthlyTop10)}以上`,
+    "- 上位しきい値は全店の在籍者を基準に固定しており、店舗別には再計算していません。",
+    "",
+    "優先対応サマリー（全店）:",
+    `- 最優先人数: ${num(priority.count)}人`,
+    `- 最優先LTV合計: ${yen(priority.ltvTotal)}`,
+    `- 最優先平均LTV: ${yen(priority.ltvAverage)}`,
+    `- 最優先のLTV上位25%人数: ${num(highPriority.count)}人`,
+    `- LTV上位25% × 最優先人数: ${num(highPriority.count)}人`,
+    `- LTV上位25% × 最優先LTV合計: ${yen(highPriority.ltvTotal)}`,
+    `- LTV上位25% × 最終利用30日以上人数: ${num(groups.topLtvOver30.length)}人`,
+    `- LTV上位25% × 直近30日0回人数: ${num(groups.topLtvZeroUse.length)}人`,
+    `- 重点フォロー候補人数: ${num(focus.count)}人`,
+    `- 重点フォロー候補LTV合計: ${yen(focus.ltvTotal)}`,
+    `- 重点フォロー候補平均LTV: ${yen(focus.ltvAverage)}`,
+    `- 最終利用30日以上LTV合計: ${yen(ltvMetricSummary(groups.over30Rows).ltvTotal)}`,
+    `- 直近30日0回LTV合計: ${yen(ltvMetricSummary(groups.zeroUseRows).ltvTotal)}`,
+    "- 重点フォロー候補は、LTV上位25%×最優先、LTV上位25%×最終利用30日以上、月あたりLTV上位25%×最優先のいずれかに該当する会員をユニーク人数で集計しています。",
+    "",
+    "店舗別比較:",
+    ...stores.map((row) => `- ${row.label}: 在籍者 ${num(row.activeCount)}人 / 集計対象 ${num(row.targetCount)}人 / 最優先 ${num(row.priorityCount)}人 (${ltvDormancyRateText(row.priorityCount, row.targetCount)}) / 最優先LTV合計 ${yen(row.priorityLtvTotal)} / LTV上位25%×最優先 ${num(row.topLtvPriorityCount)}人 / LTV上位25%×最終利用30日以上 ${num(row.topLtvOver30Count)}人 / LTV上位25%×直近30日0回 ${num(row.topLtvZeroUseCount)}人 / 月あたりLTV上位25%×最優先 ${num(row.topMonthlyPriorityCount)}人 / 最終利用30日以上LTV合計 ${yen(row.over30LtvTotal)} / 直近30日0回LTV合計 ${yen(row.zeroUseLtvTotal)}`),
+    "",
+    "利用リスク区分別LTV:",
+    ...tables.riskRows.map(([label, rows]) => aiLtvDormancyMetricLine(label, rows, analysis.thresholds)),
+    "",
+    "利用状況別LTV:",
+    ...tables.utilizationRows.map(([label, rows]) => aiLtvDormancyMetricLine(label, rows, analysis.thresholds)),
+    "- 利用状況別の各行は排他的ではありません。同一会員が複数条件に該当する場合があります。",
+    "",
+    "高LTV × 休眠リスク:",
+    ...tables.highLtvRows.map(([label, rows]) => aiLtvDormancyMetricLine(label, rows, analysis.thresholds)),
+    "",
+    "月あたりLTV × 休眠リスク:",
+    ...tables.highMonthlyRows.map(([label, rows]) => aiLtvDormancyMetricLine(label, rows, analysis.thresholds)),
+    "",
+    "注意事項:",
+    "- LTVはhacomonoの購入金額累計CSVのLTV列を正として使用しており、日付・契約期間・月額料金から再計算していません。",
+    "- 月あたりLTVはLTVを観測在籍月数で割った参考指標です。観測在籍月数1ヶ月未満、LTV不明、月あたりLTV不明の会員は一部指標の対象外です。",
+    "- 店舗別に上位しきい値を再計算していません。金額インパクトや利用状況別の各条件は重複する場合があるため、単純加算しないでください。",
+    "- 個人を特定する情報、連絡先、個別明細は含めていません。この分析は退会抑止の優先順位付けの参考であり、因果を断定するものではありません。",
+  ].join("\n");
+}
 function buildAiSettingsBlock(settings) {
   const s = normalizeAiAssistantSettings(settings);
   const storeLines = STORE_KEYS.map((store) => {
@@ -3408,6 +3477,8 @@ function buildAiAssistantPrompt({ mode, data, settings, activeNgIds, externalRep
     "- 数値根拠が弱い断定をしないでください。",
     "- 対象者、必要工数、人員、KPI、期限を具体化してください。",
     "- 店舗差を必ず確認してください。",
+    "- LTV×休眠分析では、最優先人数だけでなくLTV合計・月あたりLTVも踏まえて、金額インパクトが大きい休眠リスクの優先順位を判断してください。",
+    "- 高LTVだが利用低下している層には、追加工数なしまたは少工数で検証できるフォロー施策を検討してください。LTVが高いことを退会しやすさの因果として断定しないでください。",
     "- 個人名、会員ID、メール、電話番号、自由記述原文、詳細記述原文を含めないでください。",
     "- 不明な点は推測せず「データ不足」と明記してください。",
     "",
@@ -3422,6 +3493,7 @@ function buildAiAssistantPrompt({ mode, data, settings, activeNgIds, externalRep
     `退会理由分析: ${context?.surveyLabel || "保存済み退会アンケート全体"}`,
     `カウンセリング分析: ${buildAiCounselingScopeLabel(data)}`,
     `利用分析: ${buildAiUsageScopeLabel(data)}`,
+    "LTV×休眠分析: 保存済みLTVデータとミロンME最新snapshotDateを在籍者で照合した全店集計（店舗別上位しきい値は未再計算）",
     "",
     "## 安全な集計データ（個人情報・自由記述原文なし）",
     "### 退会分析",
@@ -3435,6 +3507,9 @@ function buildAiAssistantPrompt({ mode, data, settings, activeNgIds, externalRep
     "",
     "### ミロンME利用サマリー分析",
     buildAiUsageAnalysisSummary(data),
+    "",
+    "### LTV×休眠分析",
+    buildAiLtvDormancySummary(data),
     ...(modeKey === "B" ? [
       "",
       "## 検証対象の外部レポート",
@@ -9594,6 +9669,55 @@ function buildLtvDormancyRiskGroups(rows, thresholds) {
     ],
   };
 }
+function buildLtvDormancyMetricTables(rows, thresholds) {
+  const groups = buildLtvDormancyRiskGroups(rows, thresholds);
+  return {
+    groups,
+    riskRows: [
+      ["最優先", rows.filter((row) => row.riskLabel === "最優先")],
+      ["次点（14〜29日未利用）", rows.filter((row) => row.riskLabel === "次点（14〜29日未利用）")],
+      ["要観察", rows.filter((row) => row.riskLabel === "要観察")],
+      ["通常", rows.filter((row) => row.riskLabel === "通常")],
+      ["判定不可", rows.filter((row) => row.riskLabel === "判定不可")],
+    ],
+    utilizationRows: [
+      ["直近30日0回", rows.filter((row) => row.trLast30d === 0)],
+      ["直近30日1回", rows.filter((row) => row.trLast30d === 1)],
+      ["最終利用14日以上", rows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14)],
+      ["最終利用30日以上", rows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 30)],
+      ["最終利用60日以上", rows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 60)],
+      ["LASTLOGINなし", rows.filter((row) => !row.lastLogin)],
+      ["TR_LAST30D不明", rows.filter((row) => row.trLast30d == null)],
+    ],
+    highLtvRows: groups.highLtvRows,
+    highMonthlyRows: groups.highMonthlyRows,
+  };
+}
+function buildLtvDormancyStoreComparison(analysis) {
+  const activeStoreOfRow = (row) => analysis.activeUsageById.get(memberIdMatchKey(row.memberId))?.store || "不明";
+  const hasUnknownStore = analysis.joinedRows.some((row) => row.store === "不明") || analysis.activeRows.some((row) => activeStoreOfRow(row) === "不明");
+  const stores = [{ key: "all", label: "全店" }, ...STORE_KEYS.map((store) => ({ key: store, label: store }))];
+  if (hasUnknownStore) stores.push({ key: "不明", label: "不明" });
+  return stores.map(({ key, label }) => {
+    const activeRows = key === "all" ? analysis.activeRows : analysis.activeRows.filter((row) => activeStoreOfRow(row) === key);
+    const joinedRows = key === "all" ? analysis.joinedRows : analysis.joinedRows.filter((row) => row.store === key);
+    const groups = buildLtvDormancyRiskGroups(joinedRows, analysis.thresholds);
+    return {
+      key,
+      label,
+      activeCount: activeRows.length,
+      targetCount: joinedRows.length,
+      priorityCount: groups.topPriority.length,
+      priorityLtvTotal: ltvMetricSummary(groups.topPriority).ltvTotal,
+      topLtvPriorityCount: groups.topLtvPriority.length,
+      topLtvOver30Count: groups.topLtvOver30.length,
+      topLtvZeroUseCount: groups.topLtvZeroUse.length,
+      topMonthlyPriorityCount: groups.topMonthlyPriority.length,
+      over30LtvTotal: ltvMetricSummary(groups.over30Rows).ltvTotal,
+      zeroUseLtvTotal: ltvMetricSummary(groups.zeroUseRows).ltvTotal,
+    };
+  });
+}
 function ltvDormancyRateText(numerator, denominator) {
   return denominator > 0 ? `${(numerator / denominator * 100).toFixed(1)}%` : "—";
 }
@@ -9653,50 +9777,9 @@ function LtvDormancyTab({ data }) {
   const visibleActiveMilonMatchedRows = useMemo(() => analysis.activeMilonMatchedRows.filter(isSelectedStore), [analysis.activeMilonMatchedRows, analysis.activeUsageById, storeFilter]);
   const visibleRows = useMemo(() => analysis.joinedRows.filter((row) => storeFilter === "all" || row.store === storeFilter), [analysis.joinedRows, storeFilter]);
   const thresholds = analysis.thresholds;
-  const riskRows = [
-    ["最優先", visibleRows.filter((row) => row.riskLabel === "最優先")],
-    ["次点（14〜29日未利用）", visibleRows.filter((row) => row.riskLabel === "次点（14〜29日未利用）")],
-    ["要観察", visibleRows.filter((row) => row.riskLabel === "要観察")],
-    ["通常", visibleRows.filter((row) => row.riskLabel === "通常")],
-    ["判定不可", visibleRows.filter((row) => row.riskLabel === "判定不可")],
-  ];
-  const utilizationRows = [
-    ["直近30日0回", visibleRows.filter((row) => row.trLast30d === 0)],
-    ["直近30日1回", visibleRows.filter((row) => row.trLast30d === 1)],
-    ["最終利用14日以上", visibleRows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 14)],
-    ["最終利用30日以上", visibleRows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 30)],
-    ["最終利用60日以上", visibleRows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 60)],
-    ["LASTLOGINなし", visibleRows.filter((row) => !row.lastLogin)],
-    ["TR_LAST30D不明", visibleRows.filter((row) => row.trLast30d == null)],
-  ];
-  const groups = useMemo(() => buildLtvDormancyRiskGroups(visibleRows, thresholds), [visibleRows, thresholds]);
-  const highLtvRows = groups.highLtvRows;
-  const highMonthlyRows = groups.highMonthlyRows;
-  const storeComparisonRows = useMemo(() => {
-    const activeStoreOfRow = (row) => analysis.activeUsageById.get(memberIdMatchKey(row.memberId))?.store || "不明";
-    const hasUnknownStore = analysis.joinedRows.some((row) => row.store === "不明") || analysis.activeRows.some((row) => activeStoreOfRow(row) === "不明");
-    const stores = [{ key: "all", label: "全店" }, ...STORE_KEYS.map((store) => ({ key: store, label: store }))];
-    if (hasUnknownStore) stores.push({ key: "不明", label: "不明" });
-    return stores.map(({ key, label }) => {
-      const activeRows = key === "all" ? analysis.activeRows : analysis.activeRows.filter((row) => activeStoreOfRow(row) === key);
-      const joinedRows = key === "all" ? analysis.joinedRows : analysis.joinedRows.filter((row) => row.store === key);
-      const storeGroups = buildLtvDormancyRiskGroups(joinedRows, thresholds);
-      return {
-        key,
-        label,
-        activeCount: activeRows.length,
-        targetCount: joinedRows.length,
-        priorityCount: storeGroups.topPriority.length,
-        priorityLtvTotal: ltvMetricSummary(storeGroups.topPriority).ltvTotal,
-        topLtvPriorityCount: storeGroups.topLtvPriority.length,
-        topLtvOver30Count: storeGroups.topLtvOver30.length,
-        topLtvZeroUseCount: storeGroups.topLtvZeroUse.length,
-        topMonthlyPriorityCount: storeGroups.topMonthlyPriority.length,
-        over30LtvTotal: ltvMetricSummary(storeGroups.over30Rows).ltvTotal,
-        zeroUseLtvTotal: ltvMetricSummary(storeGroups.zeroUseRows).ltvTotal,
-      };
-    });
-  }, [analysis.activeRows, analysis.activeUsageById, analysis.joinedRows, thresholds]);
+  const metricTables = useMemo(() => buildLtvDormancyMetricTables(visibleRows, thresholds), [visibleRows, thresholds]);
+  const { groups, riskRows, utilizationRows, highLtvRows, highMonthlyRows } = metricTables;
+  const storeComparisonRows = useMemo(() => buildLtvDormancyStoreComparison(analysis), [analysis]);
   const renderMetricRow = ([label, rows]) => {
     const metric = ltvDormancySummary(rows, thresholds);
     return <tr key={label}><td style={{ textAlign: "left" }}>{label}</td><td>{num(metric.count)}</td><td>{yen(metric.ltvTotal)}</td><td>{yen(metric.ltvAverage)}</td><td>{yen(metric.ltvMedian)}</td><td>{yen(metric.monthlyLtvAverage)}</td><td>{num(metric.ltvTop25Count)}</td><td>{num(metric.ltvTop10Count)}</td></tr>;
