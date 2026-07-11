@@ -9555,10 +9555,99 @@ function ltvDormancySummary(rows, thresholds) {
     monthlyTop10Count: countAtLeast("monthlyLtv", thresholds.monthlyTop10),
   };
 }
+function buildLtvDormancyRiskGroups(rows, thresholds) {
+  const isLtvTop25 = (row) => thresholds.ltvTop25 != null && row.ltv >= thresholds.ltvTop25;
+  const isLtvTop10 = (row) => thresholds.ltvTop10 != null && row.ltv >= thresholds.ltvTop10;
+  const isMonthlyTop25 = (row) => thresholds.monthlyTop25 != null && row.monthlyLtv != null && row.monthlyLtv >= thresholds.monthlyTop25;
+  const isMonthlyTop10 = (row) => thresholds.monthlyTop10 != null && row.monthlyLtv != null && row.monthlyLtv >= thresholds.monthlyTop10;
+  const isOver30 = (row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 30;
+  const isZeroUse = (row) => row.trLast30d === 0;
+  const topPriority = rows.filter((row) => row.riskLabel === "最優先");
+  const topLtvPriority = rows.filter((row) => isLtvTop25(row) && row.riskLabel === "最優先");
+  const topLtvOver30 = rows.filter((row) => isLtvTop25(row) && isOver30(row));
+  const topLtvZeroUse = rows.filter((row) => isLtvTop25(row) && isZeroUse(row));
+  const topMonthlyPriority = rows.filter((row) => isMonthlyTop25(row) && row.riskLabel === "最優先");
+  return {
+    topPriority,
+    topLtvPriority,
+    topLtvOver30,
+    topLtvZeroUse,
+    topMonthlyPriority,
+    focusRows: rows.filter((row) => (isLtvTop25(row) && (row.riskLabel === "最優先" || isOver30(row))) || (isMonthlyTop25(row) && row.riskLabel === "最優先")),
+    over30Rows: rows.filter(isOver30),
+    zeroUseRows: rows.filter(isZeroUse),
+    highLtvRows: [
+      ["LTV上位25% × 最優先", topLtvPriority],
+      ["LTV上位25% × 最終利用30日以上", topLtvOver30],
+      ["LTV上位25% × 直近30日0回", topLtvZeroUse],
+      ["LTV上位10% × 最優先", rows.filter((row) => isLtvTop10(row) && row.riskLabel === "最優先")],
+      ["LTV上位10% × 最終利用30日以上", rows.filter((row) => isLtvTop10(row) && isOver30(row))],
+      ["LTV上位10% × 直近30日0回", rows.filter((row) => isLtvTop10(row) && isZeroUse(row))],
+    ],
+    highMonthlyRows: [
+      ["月あたりLTV上位25% × 最優先", topMonthlyPriority],
+      ["月あたりLTV上位25% × 最終利用30日以上", rows.filter((row) => isMonthlyTop25(row) && isOver30(row))],
+      ["月あたりLTV上位25% × 直近30日0回", rows.filter((row) => isMonthlyTop25(row) && isZeroUse(row))],
+      ["月あたりLTV上位10% × 最優先", rows.filter((row) => isMonthlyTop10(row) && row.riskLabel === "最優先")],
+      ["月あたりLTV上位10% × 最終利用30日以上", rows.filter((row) => isMonthlyTop10(row) && isOver30(row))],
+      ["月あたりLTV上位10% × 直近30日0回", rows.filter((row) => isMonthlyTop10(row) && isZeroUse(row))],
+    ],
+  };
+}
+function ltvDormancyRateText(numerator, denominator) {
+  return denominator > 0 ? `${(numerator / denominator * 100).toFixed(1)}%` : "—";
+}
+function LtvDormancyPrioritySummary({ groups }) {
+  const priority = ltvMetricSummary(groups.topPriority);
+  const highPriority = ltvMetricSummary(groups.topLtvPriority);
+  const focus = ltvMetricSummary(groups.focusRows);
+  return <div style={{ display: "grid", gap: 12 }}>
+    <div>
+      <div style={{ fontWeight: 800, fontSize: 16 }}>優先対応サマリー</div>
+      <div style={{ marginTop: 3, fontSize: 12, color: "var(--ink-faint)", lineHeight: 1.6 }}>現在選択中の店舗に連動します。LTV・月あたりLTVの上位しきい値は全店固定です。</div>
+    </div>
+    <div style={{ display: "grid", gap: 8 }}>
+      <div style={{ fontWeight: 800, fontSize: 12.5, color: "var(--ink-soft)" }}>最優先対応</div>
+      <div className="f4h-kpi-grid">
+        <LtvMetricCard label="最優先人数" value={`${num(priority.count)}人`} />
+        <LtvMetricCard label="最優先LTV合計" value={yen(priority.ltvTotal)} />
+        <LtvMetricCard label="最優先平均LTV" value={yen(priority.ltvAverage)} />
+        <LtvMetricCard label="最優先のLTV上位25%" value={`${num(highPriority.count)}人`} />
+      </div>
+    </div>
+    <div style={{ display: "grid", gap: 8 }}>
+      <div style={{ fontWeight: 800, fontSize: 12.5, color: "var(--ink-soft)" }}>高LTV休眠</div>
+      <div className="f4h-kpi-grid">
+        <LtvMetricCard label="LTV上位25% × 最優先" value={`${num(highPriority.count)}人`} />
+        <LtvMetricCard label="同 LTV合計" value={yen(highPriority.ltvTotal)} />
+        <LtvMetricCard label="LTV上位25% × 30日以上" value={`${num(groups.topLtvOver30.length)}人`} />
+        <LtvMetricCard label="LTV上位25% × 直近30日0回" value={`${num(groups.topLtvZeroUse.length)}人`} />
+      </div>
+    </div>
+    <div style={{ display: "grid", gap: 8 }}>
+      <div style={{ fontWeight: 800, fontSize: 12.5, color: "var(--ink-soft)" }}>重点フォロー候補</div>
+      <div className="f4h-kpi-grid">
+        <LtvMetricCard label="重点フォロー候補人数" value={`${num(focus.count)}人`} />
+        <LtvMetricCard label="重点フォロー候補LTV合計" value={yen(focus.ltvTotal)} />
+        <LtvMetricCard label="重点フォロー候補平均LTV" value={yen(focus.ltvAverage)} />
+      </div>
+    </div>
+    <div style={{ display: "grid", gap: 8 }}>
+      <div style={{ fontWeight: 800, fontSize: 12.5, color: "var(--ink-soft)" }}>金額インパクト</div>
+      <div className="f4h-kpi-grid">
+        <LtvMetricCard label="最終利用30日以上 LTV合計" value={yen(ltvMetricSummary(groups.over30Rows).ltvTotal)} />
+        <LtvMetricCard label="直近30日0回 LTV合計" value={yen(ltvMetricSummary(groups.zeroUseRows).ltvTotal)} />
+        <LtvMetricCard label="最優先 LTV合計" value={yen(priority.ltvTotal)} />
+      </div>
+    </div>
+    <div className="f4h-card" style={{ padding: 12, fontSize: 11.5, color: "var(--ink-faint)", lineHeight: 1.65 }}>重点フォロー候補は「LTV上位25% × 最優先」「LTV上位25% × 最終利用30日以上」「月あたりLTV上位25% × 最優先」のいずれかに該当する会員を、重複なく集計しています。金額インパクトの各条件は重複する場合があるため、単純加算しないでください。</div>
+  </div>;
+}
 function LtvDormancyTab({ data }) {
   const [storeFilter, setStoreFilter] = useState("all");
   const analysis = useMemo(() => buildLtvDormancyAnalysis(data), [data]);
-  const isSelectedStore = (row) => storeFilter === "all" || analysis.activeUsageById.get(memberIdMatchKey(row.memberId))?.store === storeFilter;
+  const activeStoreOf = (row) => analysis.activeUsageById.get(memberIdMatchKey(row.memberId))?.store || "不明";
+  const isSelectedStore = (row) => storeFilter === "all" || activeStoreOf(row) === storeFilter;
   const visibleActiveRows = useMemo(() => analysis.activeRows.filter(isSelectedStore), [analysis.activeRows, analysis.activeUsageById, storeFilter]);
   const visibleActiveLtvKnownRows = useMemo(() => analysis.activeLtvKnownRows.filter(isSelectedStore), [analysis.activeLtvKnownRows, analysis.activeUsageById, storeFilter]);
   const visibleActiveMilonMatchedRows = useMemo(() => analysis.activeMilonMatchedRows.filter(isSelectedStore), [analysis.activeMilonMatchedRows, analysis.activeUsageById, storeFilter]);
@@ -9580,22 +9669,34 @@ function LtvDormancyTab({ data }) {
     ["LASTLOGINなし", visibleRows.filter((row) => !row.lastLogin)],
     ["TR_LAST30D不明", visibleRows.filter((row) => row.trLast30d == null)],
   ];
-  const highLtvRows = [
-    ["LTV上位25% × 最優先", visibleRows.filter((row) => row.riskLabel === "最優先" && thresholds.ltvTop25 != null && row.ltv >= thresholds.ltvTop25)],
-    ["LTV上位25% × 最終利用30日以上", visibleRows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 30 && thresholds.ltvTop25 != null && row.ltv >= thresholds.ltvTop25)],
-    ["LTV上位25% × 直近30日0回", visibleRows.filter((row) => row.trLast30d === 0 && thresholds.ltvTop25 != null && row.ltv >= thresholds.ltvTop25)],
-    ["LTV上位10% × 最優先", visibleRows.filter((row) => row.riskLabel === "最優先" && thresholds.ltvTop10 != null && row.ltv >= thresholds.ltvTop10)],
-    ["LTV上位10% × 最終利用30日以上", visibleRows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 30 && thresholds.ltvTop10 != null && row.ltv >= thresholds.ltvTop10)],
-    ["LTV上位10% × 直近30日0回", visibleRows.filter((row) => row.trLast30d === 0 && thresholds.ltvTop10 != null && row.ltv >= thresholds.ltvTop10)],
-  ];
-  const highMonthlyRows = [
-    ["月あたりLTV上位25% × 最優先", visibleRows.filter((row) => row.riskLabel === "最優先" && thresholds.monthlyTop25 != null && row.monthlyLtv != null && row.monthlyLtv >= thresholds.monthlyTop25)],
-    ["月あたりLTV上位25% × 最終利用30日以上", visibleRows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 30 && thresholds.monthlyTop25 != null && row.monthlyLtv != null && row.monthlyLtv >= thresholds.monthlyTop25)],
-    ["月あたりLTV上位25% × 直近30日0回", visibleRows.filter((row) => row.trLast30d === 0 && thresholds.monthlyTop25 != null && row.monthlyLtv != null && row.monthlyLtv >= thresholds.monthlyTop25)],
-    ["月あたりLTV上位10% × 最優先", visibleRows.filter((row) => row.riskLabel === "最優先" && thresholds.monthlyTop10 != null && row.monthlyLtv != null && row.monthlyLtv >= thresholds.monthlyTop10)],
-    ["月あたりLTV上位10% × 最終利用30日以上", visibleRows.filter((row) => row.daysSinceLastLogin != null && row.daysSinceLastLogin >= 30 && thresholds.monthlyTop10 != null && row.monthlyLtv != null && row.monthlyLtv >= thresholds.monthlyTop10)],
-    ["月あたりLTV上位10% × 直近30日0回", visibleRows.filter((row) => row.trLast30d === 0 && thresholds.monthlyTop10 != null && row.monthlyLtv != null && row.monthlyLtv >= thresholds.monthlyTop10)],
-  ];
+  const groups = useMemo(() => buildLtvDormancyRiskGroups(visibleRows, thresholds), [visibleRows, thresholds]);
+  const highLtvRows = groups.highLtvRows;
+  const highMonthlyRows = groups.highMonthlyRows;
+  const storeComparisonRows = useMemo(() => {
+    const activeStoreOfRow = (row) => analysis.activeUsageById.get(memberIdMatchKey(row.memberId))?.store || "不明";
+    const hasUnknownStore = analysis.joinedRows.some((row) => row.store === "不明") || analysis.activeRows.some((row) => activeStoreOfRow(row) === "不明");
+    const stores = [{ key: "all", label: "全店" }, ...STORE_KEYS.map((store) => ({ key: store, label: store }))];
+    if (hasUnknownStore) stores.push({ key: "不明", label: "不明" });
+    return stores.map(({ key, label }) => {
+      const activeRows = key === "all" ? analysis.activeRows : analysis.activeRows.filter((row) => activeStoreOfRow(row) === key);
+      const joinedRows = key === "all" ? analysis.joinedRows : analysis.joinedRows.filter((row) => row.store === key);
+      const storeGroups = buildLtvDormancyRiskGroups(joinedRows, thresholds);
+      return {
+        key,
+        label,
+        activeCount: activeRows.length,
+        targetCount: joinedRows.length,
+        priorityCount: storeGroups.topPriority.length,
+        priorityLtvTotal: ltvMetricSummary(storeGroups.topPriority).ltvTotal,
+        topLtvPriorityCount: storeGroups.topLtvPriority.length,
+        topLtvOver30Count: storeGroups.topLtvOver30.length,
+        topLtvZeroUseCount: storeGroups.topLtvZeroUse.length,
+        topMonthlyPriorityCount: storeGroups.topMonthlyPriority.length,
+        over30LtvTotal: ltvMetricSummary(storeGroups.over30Rows).ltvTotal,
+        zeroUseLtvTotal: ltvMetricSummary(storeGroups.zeroUseRows).ltvTotal,
+      };
+    });
+  }, [analysis.activeRows, analysis.activeUsageById, analysis.joinedRows, thresholds]);
   const renderMetricRow = ([label, rows]) => {
     const metric = ltvDormancySummary(rows, thresholds);
     return <tr key={label}><td style={{ textAlign: "left" }}>{label}</td><td>{num(metric.count)}</td><td>{yen(metric.ltvTotal)}</td><td>{yen(metric.ltvAverage)}</td><td>{yen(metric.ltvMedian)}</td><td>{yen(metric.monthlyLtvAverage)}</td><td>{num(metric.ltvTop25Count)}</td><td>{num(metric.ltvTop10Count)}</td></tr>;
@@ -9622,6 +9723,12 @@ function LtvDormancyTab({ data }) {
       <div>LTV上位25%: <b className="num">{yen(thresholds.ltvTop25)}</b> / 上位10%: <b className="num">{yen(thresholds.ltvTop10)}</b></div>
       <div>月あたりLTV上位25%: <b className="num">{yen(thresholds.monthlyTop25)}</b> / 上位10%: <b className="num">{yen(thresholds.monthlyTop10)}</b></div>
       <div style={{ fontSize: 11.5, color: "var(--ink-faint)" }}>しきい値は全店の在籍者LTV数値あり母集団から算出し、店舗フィルターを切り替えても固定です。同額が並ぶ場合は、上位対象人数が厳密な25%・10%を上回ることがあります。</div>
+    </div>
+    <LtvDormancyPrioritySummary groups={groups} />
+    <div className="f4h-card scrollbar-thin" style={{ padding: 14, overflowX: "auto" }}>
+      <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 4 }}>店舗別比較表</div>
+      <div style={{ fontSize: 11.5, color: "var(--ink-faint)", marginBottom: 10, lineHeight: 1.6 }}>Hacomono在籍者側の所属店舗を優先して集計しています。LTV・月あたりLTVの上位しきい値は全店固定で、店舗ごとに再計算していません。最終利用30日以上、直近30日0回、最優先の条件は重複するため、各LTV合計を単純加算しないでください。</div>
+      <table className="f4h-table"><thead><tr><th>店舗</th><th>在籍者数</th><th>集計対象</th><th>最優先人数</th><th>最優先率</th><th>最優先LTV合計</th><th>LTV上位25% × 最優先</th><th>LTV上位25% × 30日以上</th><th>LTV上位25% × 直近30日0回</th><th>月あたりLTV上位25% × 最優先</th><th>30日以上LTV合計</th><th>直近30日0回LTV合計</th></tr></thead><tbody>{storeComparisonRows.map((row) => <tr key={row.key}><td style={{ textAlign: "left" }}>{row.label}</td><td>{num(row.activeCount)}</td><td>{num(row.targetCount)}</td><td>{num(row.priorityCount)}</td><td>{ltvDormancyRateText(row.priorityCount, row.targetCount)}</td><td>{yen(row.priorityLtvTotal)}</td><td>{num(row.topLtvPriorityCount)}</td><td>{num(row.topLtvOver30Count)}</td><td>{num(row.topLtvZeroUseCount)}</td><td>{num(row.topMonthlyPriorityCount)}</td><td>{yen(row.over30LtvTotal)}</td><td>{yen(row.zeroUseLtvTotal)}</td></tr>)}</tbody></table>
     </div>
     <div className="f4h-card scrollbar-thin" style={{ padding: 14, overflowX: "auto" }}>
       <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 10 }}>利用リスク区分別LTV</div>
