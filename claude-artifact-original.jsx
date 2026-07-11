@@ -9480,13 +9480,12 @@ function LtvTenureTab({ analysis }) {
   const excludedCount = analysis.rows.length - targetCount;
   return <div className="f4h-card scrollbar-thin" style={{ padding: 14, overflowX: "auto" }}>
     <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 10 }}>在籍期間別LTV</div>
-    <div style={{ fontSize: 12, color: "var(--ink-soft)", lineHeight: 1.7, marginBottom: 8 }}>在籍期間別LTVは、joinDateと観測終了日から観測在籍月数を算出できた会員のみを対象にしています。不明ステータスや入会日不明の会員は含まれません。</div>
+    <div style={{ fontSize: 12, color: "var(--ink-soft)", lineHeight: 1.7, marginBottom: 8 }}>在籍期間別LTVは、joinDateと観測終了日から観測在籍月数を算出できた会員のみを対象に、在籍期間帯ごとのLTVを比較する表です。退会率や離脱率を示すものではありません。不明ステータスや入会日不明の会員は含まれません。</div>
     <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 10 }}><CounselingStatLine label="在籍期間別LTV対象人数" value={`${num(targetCount)}人`} /><CounselingStatLine label="対象外人数" value={`${num(excludedCount)}人`} /></div>
-    <table className="f4h-table"><thead><tr><th>観測在籍期間</th><th>人数</th><th>平均LTV</th><th>中央値LTV</th><th>月あたりLTV平均</th><th>退会者割合</th></tr></thead><tbody>{bands.map((band) => {
+    <table className="f4h-table"><thead><tr><th>観測在籍期間</th><th>人数</th><th>平均LTV</th><th>中央値LTV</th><th>月あたりLTV平均</th></tr></thead><tbody>{bands.map((band) => {
       const rows = analysis.rows.filter((row) => row.tenureBand === band);
       const metric = ltvMetricSummary(rows);
-      const cancelled = rows.filter((row) => row.status === "退会者").length;
-      return <tr key={band}><td style={{ textAlign: "left" }}>{band}</td><td>{num(metric.count)}</td><td>{yen(metric.ltvAverage)}</td><td>{yen(metric.ltvMedian)}</td><td>{yen(metric.monthlyLtvAverage)}</td><td>{pct1(metric.count ? cancelled / metric.count : null)}</td></tr>;
+      return <tr key={band}><td style={{ textAlign: "left" }}>{band}</td><td>{num(metric.count)}</td><td>{yen(metric.ltvAverage)}</td><td>{yen(metric.ltvMedian)}</td><td>{yen(metric.monthlyLtvAverage)}</td></tr>;
     })}</tbody></table>
   </div>;
 }
