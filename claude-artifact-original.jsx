@@ -9073,6 +9073,37 @@ function usageCancelLastUseSummary(rows) {
     medianGap: medianOf(gapValues),
   };
 }
+function usageCancelMostFrequentGapBucket(summary) {
+  if (!summary?.validGapRows?.length) return null;
+  const buckets = [
+    { label: "7日以内", count: summary.within7.length, band: 0 },
+    { label: "8〜14日", count: summary.from8To14.length, band: 0 },
+    { label: "15〜29日", count: summary.between15And29.length, band: 0 },
+    { label: "30〜59日", count: summary.from30To59.length, band: 1 },
+    { label: "60〜89日", count: summary.from60To89.length, band: 2 },
+    { label: "90日以上", count: summary.over90.length, band: 3 },
+  ];
+  return buckets.reduce((most, bucket) => bucket.count > most.count ? bucket : most, buckets[0]);
+}
+function usageCancelDormancyTrend(summary) {
+  const mostFrequentBucket = usageCancelMostFrequentGapBucket(summary);
+  if (!mostFrequentBucket || summary.medianGap == null) {
+    return {
+      mostFrequentBucket: "—",
+      label: "—",
+      description: "空白日数を算出できる退会者がいないため、目安は表示できません。",
+    };
+  }
+  const medianBand = summary.medianGap >= 90 ? 3 : summary.medianGap >= 60 ? 2 : summary.medianGap >= 30 ? 1 : 0;
+  const band = Math.max(medianBand, mostFrequentBucket.band);
+  const trends = [
+    { label: "15〜30日前後", description: "退会前の利用停止は30日前後までに見え始めている可能性があります。" },
+    { label: "30〜60日前後", description: "退会前の利用停止は30〜60日前後に集中しています。" },
+    { label: "60〜90日前後", description: "退会前の利用停止は比較的長期化してから退会に至る傾向があります。" },
+    { label: "90日以上前", description: "長期休眠後に退会している傾向があります。" },
+  ];
+  return { mostFrequentBucket: mostFrequentBucket.label, ...trends[band] };
+}
 function usageCancelMonthlySummaries(rows) {
   const rowsByMonth = new Map();
   rows.forEach((row) => {
@@ -9541,6 +9572,7 @@ function UsageCancelLastUseTab({ usage }) {
   const canShowMonthlyComparison = period.mode === "all" || period.mode === "last3" || period.mode === "last6" || (period.mode === "custom" && period.startMonth && period.endMonth && period.startMonth !== period.endMonth);
   const validGapRatio = (count) => pct1(summary.validGapRows.length ? count / summary.validGapRows.length : null);
   const selectionRatio = (count) => pct1(rows.length ? count / rows.length : null);
+  const dormancyTrend = usageCancelDormancyTrend(summary);
   const selectPeriodMode = (mode) => {
     setPeriodMode(mode);
     if (mode === "custom" && !customStartMonth && !customEndMonth) {
@@ -9570,7 +9602,7 @@ function UsageCancelLastUseTab({ usage }) {
   return (
     <div style={{ display: "grid", gap: 16 }}>
       <div className="f4h-card" style={{ padding: 14, background: "var(--surface-soft)", fontSize: 12.5, color: "var(--ink-soft)", lineHeight: 1.7 }}>
-        この分析は、選択中snapshotDateのミロンME利用サマリーに残っているLASTLOGINと退会者CSVの退会日を照合し、最終利用日から退会日までの空白期間を集計しています。退会期間フィルターは退会日を基準にし、snapshotDateはミロンME照合元の選択にのみ使用します。TR_LAST30Dはデータ基準日時点の直近30日利用回数であり、退会前30日利用回数ではありません。退会前30日・60日・90日の正確な利用回数や月別推移は、このデータだけでは算出できません。
+        この分析は、選択中snapshotDateのミロンME利用サマリーに残っているLASTLOGINと退会者CSVの退会日を照合し、最終利用日から退会日までの空白期間を集計しています。退会期間フィルターは退会日を基準にし、snapshotDateはミロンME照合元の選択にのみ使用します。TR_LAST30Dはデータ基準日時点の直近30日利用回数であり、退会前30日利用回数ではありません。退会前30日・60日・90日の正確な利用回数や月別推移、週1回来ていた人が退会しにくいかどうかは、このデータだけでは検証できません。
       </div>
       <div className="f4h-card" style={{ padding: 14, display: "grid", gap: 10 }}>
         <div style={{ fontSize: 12.5, color: "var(--ink-soft)", fontWeight: 700 }}>退会期間フィルター（退会日基準）</div>
@@ -9616,6 +9648,29 @@ function UsageCancelLastUseTab({ usage }) {
         <UsageKpiCard label="退会日後LASTLOGIN" value={`${num(summary.afterCancel.length)}人`} />
         <UsageKpiCard label="退会日不明" value={`${num(summary.noCancelDate.length)}人`} />
       </div>
+      <div className="f4h-card" style={{ padding: 14, display: "grid", gap: 12 }}>
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 800 }}>退会前休眠トレンド</div>
+          <div style={{ marginTop: 4, fontSize: 12, color: "var(--ink-faint)", lineHeight: 1.6 }}>選択中の退会期間・店舗に連動した、過去退会者の利用停止傾向です。</div>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(132px, 1fr))", gap: 12 }}>
+          {[
+            ["空白日数算出対象人数", `${num(summary.validGapRows.length)}人`],
+            ["中央値空白日数", summary.medianGap == null ? "—" : `${Math.round(summary.medianGap * 10) / 10}日`],
+            ["平均空白日数", summary.avgGap == null ? "—" : `${Math.round(summary.avgGap * 10) / 10}日`],
+            ["最多バケット", dormancyTrend.mostFrequentBucket],
+            ["30日以上割合", validGapRatio(summary.over30.length)],
+            ["60日以上割合", validGapRatio(summary.over60.length)],
+            ["90日以上割合", validGapRatio(summary.over90.length)],
+          ].map(([label, value]) => <div key={label} style={{ display: "grid", gap: 3 }}><div style={{ fontSize: 11.5, color: "var(--ink-faint)", fontWeight: 700 }}>{label}</div><div className="num" style={{ fontSize: 16, fontWeight: 800 }}>{value}</div></div>)}
+        </div>
+        <div style={{ padding: "10px 12px", border: "1px solid var(--border-soft)", background: "var(--surface-soft)", fontSize: 12.5, lineHeight: 1.7 }}>
+          <b>退会前休眠開始の目安: {dormancyTrend.label}</b><br />
+          {dormancyTrend.description}{summary.validGapRows.length ? ` 中央値は${Math.round(summary.medianGap * 10) / 10}日、最多バケットは${dormancyTrend.mostFrequentBucket}で、30日以上の空白は${num(summary.over30.length)}人（${validGapRatio(summary.over30.length)}）です。` : ""}
+        </div>
+        {summary.validGapRows.length < 20 && <div style={{ fontSize: 12, color: "var(--ink-soft)", lineHeight: 1.6 }}><b>参考値:</b> 空白日数算出対象人数が20人未満のため、最多バケットや休眠開始の目安は少数の変動に影響されやすい参考値として扱ってください。</div>}
+        <div style={{ fontSize: 12, color: "var(--ink-faint)", lineHeight: 1.7 }}>この数値は、退会者が実際に利用をやめたタイミングの記述統計です。この時点で介入すれば退会を防げることを示すものではありません。介入の効果は、実際に早期フォローを行った場合の結果と比較検証する必要があります。</div>
+      </div>
       <div className="f4h-card" style={{ padding: 14, display: "grid", gap: 10 }}>
         <div>
           <div style={{ fontSize: 14, fontWeight: 800 }}>最終利用から退会までの空白日数分布</div>
@@ -9642,13 +9697,15 @@ function UsageCancelLastUseTab({ usage }) {
         </div>
         <div className="scrollbar-thin" style={{ overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8 }}>
           <table className="f4h-table">
-            <thead><tr><th>退会月</th><th>退会者数</th><th>空白日数算出可能</th><th>平均空白日数</th><th>中央値空白日数</th><th>30日以上</th><th>60日以上</th><th>90日以上</th><th>LASTLOGINなし</th><th>退会日後LASTLOGIN</th></tr></thead>
+            <thead><tr><th>退会月</th><th>退会者数</th><th>空白日数算出可能</th><th>平均空白日数</th><th>中央値空白日数</th><th>最多バケット</th><th>退会前休眠開始の目安</th><th>サンプル注記</th><th>30日以上</th><th>60日以上</th><th>90日以上</th><th>LASTLOGINなし</th><th>退会日後LASTLOGIN</th></tr></thead>
             <tbody>
               {monthlySummaries.map(({ month, rows: monthRows, summary: monthSummary }) => {
                 const ratio = (count) => pct1(monthSummary.validGapRows.length ? count / monthSummary.validGapRows.length : null);
+                const monthTrend = usageCancelDormancyTrend(monthSummary);
                 return <tr key={month}>
                   <td>{month}</td><td className="num">{num(monthRows.length)}人</td><td className="num">{num(monthSummary.validGapRows.length)}人</td>
                   <td className="num">{monthSummary.avgGap == null ? "—" : `${Math.round(monthSummary.avgGap * 10) / 10}日`}</td><td className="num">{monthSummary.medianGap == null ? "—" : `${Math.round(monthSummary.medianGap * 10) / 10}日`}</td>
+                  <td>{monthTrend.mostFrequentBucket}</td><td>{monthTrend.label}</td><td>{monthSummary.validGapRows.length < 20 ? "参考値" : "—"}</td>
                   <td className="num">{num(monthSummary.over30.length)}人 / {ratio(monthSummary.over30.length)}</td><td className="num">{num(monthSummary.over60.length)}人 / {ratio(monthSummary.over60.length)}</td><td className="num">{num(monthSummary.over90.length)}人 / {ratio(monthSummary.over90.length)}</td>
                   <td className="num">{num(monthSummary.noLastLogin.length)}人</td><td className="num">{num(monthSummary.afterCancel.length)}人</td>
                 </tr>;
