@@ -370,30 +370,50 @@ function suggestTrialMapping(headers) {
 }
 function isFreeTrialTicket(ticketRaw) {
   const ticket = String(ticketRaw || "").normalize("NFKC").trim();
-  return ticket.includes("無料体験") || ticket.includes("トライアル");
+  return !ticket.includes("カウンセリング") && (ticket.includes("無料体験") || ticket.includes("トライアル"));
 }
-function trialCsvRowValue(row, names) {
-  const header = resolveTrialCsvHeader(Object.keys(row || {}), names);
+const TRIAL_FALLBACK_HEADER_HINTS = {
+  programName: ["プログラム名", "プログラム名称", "クラス名", "レッスン名", "programName", "program_name"],
+  bookingMethod: ["予約方法", "予約受付方法", "予約種別", "bookingMethod", "booking_method"],
+  reservationCategory: ["店舗予約カテゴリ", "店舗予約カテゴリー", "予約カテゴリ", "予約カテゴリー", "reservationCategory", "reservation_category"],
+};
+function resolveTrialFallbackHeaders(headers) {
+  return Object.fromEntries(Object.entries(TRIAL_FALLBACK_HEADER_HINTS).map(([key, names]) => [key, resolveTrialCsvHeader(headers, names)]));
+}
+function trialCsvRowValue(row, header) {
   return header ? row[header] : "";
 }
-function isLegacyFreeTrialRow(row) {
-  const programName = String(trialCsvRowValue(row, ["プログラム名", "クラス名", "レッスン名", "programName", "program_name"]) || "").normalize("NFKC").trim();
-  const bookingMethod = String(trialCsvRowValue(row, ["予約方法", "予約種別", "bookingMethod", "booking_method"]) || "").normalize("NFKC").trim();
-  const reservationCategory = String(trialCsvRowValue(row, ["店舗予約カテゴリ", "予約カテゴリ", "reservationCategory", "reservation_category"]) || "").normalize("NFKC").trim();
+function legacyTrialMatchReason(row, fallbackHeaders) {
+  const programName = String(trialCsvRowValue(row, fallbackHeaders.programName) || "").normalize("NFKC").trim();
+  const bookingMethod = String(trialCsvRowValue(row, fallbackHeaders.bookingMethod) || "").normalize("NFKC").trim();
+  const reservationCategory = String(trialCsvRowValue(row, fallbackHeaders.reservationCategory) || "").normalize("NFKC").trim();
 
   if (
     programName.includes("カウンセリング") ||
     programName.includes("スタジオ") ||
     programName.includes("ストレッチポール") ||
     bookingMethod.includes("カウンセリング")
-  ) return false;
-  if (programName.includes("無料体験")) return true;
-  if (bookingMethod.includes("無料体験予約") || bookingMethod.includes("無料体験")) return true;
-  return normalizedCsvHeaderName(reservationCategory) === normalizedCsvHeaderName("無料体験");
+  ) return "";
+  if (programName.includes("無料体験")) return "programName";
+  if (bookingMethod.includes("無料体験予約") || bookingMethod.includes("無料体験")) return "bookingMethod";
+  return normalizedCsvHeaderName(reservationCategory) === normalizedCsvHeaderName("無料体験") ? "reservationCategory" : "";
 }
-function freeTrialCandidateRows(rawRows, mapping) {
+function freeTrialCandidateSummary(rawRows, mapping, headers) {
   const ticketMatches = (rawRows || []).filter((row) => isFreeTrialTicket(mapping.ticket ? row[mapping.ticket] : ""));
-  return ticketMatches.length > 0 ? ticketMatches : (rawRows || []).filter(isLegacyFreeTrialRow);
+  if (ticketMatches.length > 0) {
+    return { rows: ticketMatches, ticketCount: ticketMatches.length, fallbackCount: 0, programNameCount: 0, bookingMethodCount: 0, reservationCategoryCount: 0, source: "ticket" };
+  }
+  const fallbackHeaders = resolveTrialFallbackHeaders(headers || Object.keys((rawRows || [])[0] || {}));
+  const matches = (rawRows || []).map((row) => ({ row, reason: legacyTrialMatchReason(row, fallbackHeaders) })).filter(({ reason }) => reason);
+  return {
+    rows: matches.map(({ row }) => row),
+    ticketCount: 0,
+    fallbackCount: matches.length,
+    programNameCount: matches.filter(({ reason }) => reason === "programName").length,
+    bookingMethodCount: matches.filter(({ reason }) => reason === "bookingMethod").length,
+    reservationCategoryCount: matches.filter(({ reason }) => reason === "reservationCategory").length,
+    source: "fallback",
+  };
 }
 function stableImportKey(parts) {
   return parts.map((part) => String(part ?? "").trim()).join("__");
@@ -546,9 +566,9 @@ function cleanJoinCsvRows(rawRows, mapping) {
   return out;
 }
 // 生CSV行 + マッピング -> クレンジング済みtrial候補（store正規化・無料体験のみ）
-function cleanCsvRows(rawRows, mapping) {
+function cleanCsvRows(rawRows, mapping, headers) {
   const out = [];
-  for (const row of freeTrialCandidateRows(rawRows, mapping)) {
+  for (const row of freeTrialCandidateSummary(rawRows, mapping, headers).rows) {
     const ticketRaw = mapping.ticket ? row[mapping.ticket] : "";
     const storeRaw = mapping.store ? row[mapping.store] : "";
     const store = matchStoreName(storeRaw);
@@ -6195,10 +6215,14 @@ function TrialImportPanel({ data, updateData, showToast }) {
     }
   }, [csvText, doParse]);
 
+  const trialCandidateSummary = useMemo(() => {
+    if (!rawRows || !mapping) return null;
+    return freeTrialCandidateSummary(rawRows, mapping, headers);
+  }, [rawRows, mapping, headers]);
   const cleaned = useMemo(() => {
     if (!rawRows || !mapping) return [];
-    return cleanCsvRows(rawRows, mapping);
-  }, [rawRows, mapping]);
+    return cleanCsvRows(rawRows, mapping, headers);
+  }, [rawRows, mapping, headers]);
 
   const dedup = useMemo(() => dedupeAgainstExisting(cleaned, data.trials), [cleaned, data.trials]);
   const displayTrials = useMemo(() => dedupeTrialRows(data.trials), [data.trials]);
@@ -6350,6 +6374,7 @@ function TrialImportPanel({ data, updateData, showToast }) {
               <>
                 <div style={{ display: "flex", gap: 14, fontSize: 12.5, color: "var(--ink-soft)", marginBottom: 8, flexWrap: "wrap" }}>
                   <span>無料体験対象 <b className="num">{cleaned.length}</b>件</span>
+                  {trialCandidateSummary && <span>無料体験検出: 使用チケット {trialCandidateSummary.ticketCount}件 / 補完判定 {trialCandidateSummary.fallbackCount}件</span>}
                   <span>新規取込 <b className="num" style={{ color: "var(--go)" }}>{dedup.accepted.length}</b>件</span>
                   <span>新規追加 <b className="num" style={{ color: "var(--go)" }}>{dedup.added}</b>件</span>
                   <span>更新 <b className="num">{dedup.updated}</b>件</span>
