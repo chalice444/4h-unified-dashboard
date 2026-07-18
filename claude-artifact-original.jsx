@@ -309,21 +309,42 @@ const REQUIRED_TRIAL_FIELDS = [
 ];
 const REQUIRED_JOIN_FIELDS = [
   { key: "memberId", label: "メンバーID", required: true },
-  { key: "effectiveDate", label: "入会月判定日", required: true },
+  { key: "effectiveDate", label: "プラン契約適用開始日", required: true },
 ];
 const HEADER_HINTS = {
   store: ["店舗", "店", "施設"],
   ticket: ["チケット", "使用チケット", "種別", "予約枠"],
   lessonDate: ["受講日", "予約日", "来店日", "実施日"],
-  memberId: ["メンバーID", "memberId", "メンバーId", "会員ID", "メンバー番号", "会員番号"],
+  memberId: ["メンバーid", "会員id", "id", "メンバー番号", "会員番号"],
   name: ["氏名", "名前", "お名前"],
   gender: ["性別"],
   age: ["年齢"],
   applyDate: ["予約処理日", "申込日", "予約日時"],
   startTime: ["開始時刻", "時刻", "時間"],
-  effectiveDate: ["プラン契約適用開始日", "契約適用開始日", "適用開始日", "利用開始日", "入会日時", "入会日", "無料体験会受講日時", "トライアル 初回受講日時", "受講日"],
+  effectiveDate: ["プラン契約適用開始日", "契約適用開始日", "適用開始日", "入会日"],
 };
-function resolveCsvHeader(headers, names) {
+function suggestMapping(headers, fields = REQUIRED_TRIAL_FIELDS) {
+  const lower = headers.map((h) => String(h).toLowerCase());
+  const mapping = {};
+  for (const f of fields) {
+    const hints = HEADER_HINTS[f.key] || [];
+    let found = "";
+    for (const hint of hints) {
+      const idx = lower.findIndex((h) => h.includes(hint.toLowerCase()));
+      if (idx !== -1) { found = headers[idx]; break; }
+    }
+    mapping[f.key] = found;
+  }
+  return mapping;
+}
+const TRIAL_HEADER_HINTS = {
+  ...HEADER_HINTS,
+  store: ["店舗", "店", "施設"],
+  ticket: ["使用チケット", "チケット", "種別", "予約枠"],
+  lessonDate: ["受講日", "無料体験会受講日時", "トライアル 初回受講日時", "予約日", "来店日", "実施日"],
+  memberId: ["メンバーID", "memberId", "メンバーId", "会員ID", "メンバー番号", "会員番号"],
+};
+function resolveTrialCsvHeader(headers, names) {
   const normalizedHeaders = (headers || []).map((header) => ({
     header,
     normalized: normalizedCsvHeaderName(header),
@@ -340,10 +361,10 @@ function resolveCsvHeader(headers, names) {
   }
   return "";
 }
-function suggestMapping(headers, fields = REQUIRED_TRIAL_FIELDS) {
+function suggestTrialMapping(headers) {
   const mapping = {};
-  for (const f of fields) {
-    mapping[f.key] = resolveCsvHeader(headers, HEADER_HINTS[f.key] || []);
+  for (const field of REQUIRED_TRIAL_FIELDS) {
+    mapping[field.key] = resolveTrialCsvHeader(headers, TRIAL_HEADER_HINTS[field.key] || []);
   }
   return mapping;
 }
@@ -6098,6 +6119,7 @@ function TrialImportPanel({ data, updateData, showToast }) {
   const [visibleCount, setVisibleCount] = useState(40);
   const [delTarget, setDelTarget] = useState(null);
   const [selectedTrialIds, setSelectedTrialIds] = useState([]);
+  const [parseError, setParseError] = useState("");
   const fileRef = useRef(null);
 
   const doParse = useCallback((text) => {
@@ -6107,13 +6129,27 @@ function TrialImportPanel({ data, updateData, showToast }) {
       header: true, skipEmptyLines: true,
       complete: (res) => {
         const hdrs = res.meta.fields || [];
+        if (!hdrs.length || res.errors?.length) {
+          const detail = res.errors?.[0]?.message;
+          setRawRows(null);
+          setHeaders([]);
+          setMapping(null);
+          setParseError(detail ? `CSVの解析に失敗しました: ${detail}` : "CSVヘッダーを読み取れませんでした。");
+          return;
+        }
         setHeaders(hdrs);
         setRawRows(res.data);
-        setMapping(suggestMapping(hdrs));
+        setMapping(suggestTrialMapping(hdrs));
+        setParseError("");
       },
-      error: () => showToast("CSVの解析に失敗しました。", true),
+      error: () => {
+        setRawRows(null);
+        setHeaders([]);
+        setMapping(null);
+        setParseError("CSVの解析に失敗しました。");
+      },
     });
-  }, [showToast]);
+  }, []);
 
   const onFile = useCallback((e) => {
     const f = e.target.files?.[0];
@@ -6122,13 +6158,19 @@ function TrialImportPanel({ data, updateData, showToast }) {
     reader.onload = (ev) => {
       const text = ev.target.result;
       setCsvText(text);
+      setParseError("");
       doParse(text);
     };
-    reader.onerror = () => showToast("ファイルの読み込みに失敗しました。", true);
+    reader.onerror = () => setParseError("ファイルの読み込みに失敗しました。");
     reader.readAsText(f, "UTF-8");
   }, [doParse, showToast]);
 
-  const onParseText = useCallback(() => { if (csvText.trim()) doParse(csvText); }, [csvText, doParse]);
+  const onParseText = useCallback(() => {
+    if (csvText.trim()) {
+      setParseError("");
+      doParse(csvText);
+    }
+  }, [csvText, doParse]);
 
   const cleaned = useMemo(() => {
     if (!rawRows || !mapping) return [];
@@ -6140,6 +6182,14 @@ function TrialImportPanel({ data, updateData, showToast }) {
   const savedDuplicateCount = Math.max(0, data.trials.length - displayTrials.length);
 
   const handleImport = async () => {
+    if (!mappingValid) {
+      showToast(`必須列が不足しています: ${missingRequiredHeaders.join("・")}`, true);
+      return;
+    }
+    if (!cleaned.length) {
+      showToast("無料体験チケットに該当する行が0件でした。既存の体験者データは変更していません。", true);
+      return;
+    }
     if (!dedup.accepted.length) { showToast("取り込める新規データがありません。", true); return; }
     let result = null;
     await updateData("trials", (cur) => {
@@ -6223,6 +6273,7 @@ function TrialImportPanel({ data, updateData, showToast }) {
   };
 
   const mappingValid = mapping && mapping.store && mapping.ticket && mapping.lessonDate;
+  const missingRequiredHeaders = mapping ? REQUIRED_TRIAL_FIELDS.filter((field) => field.required && !mapping[field.key]).map((field) => field.label) : [];
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -6249,10 +6300,15 @@ function TrialImportPanel({ data, updateData, showToast }) {
           </button>
           <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }}
             disabled={!csvText && !rawRows}
-            onClick={() => { setCsvText(""); setRawRows(null); setHeaders([]); setMapping(null); if (fileRef.current) fileRef.current.value = ""; }}>
+            onClick={() => { setCsvText(""); setRawRows(null); setHeaders([]); setMapping(null); setParseError(""); if (fileRef.current) fileRef.current.value = ""; }}>
             <X size={13} /> リセット
           </button>
         </div>
+        {parseError && (
+          <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginTop: 10 }}>
+            <AlertTriangle size={14} /> {parseError} 既存の体験者データは変更していません。
+          </div>
+        )}
 
         {rawRows && (
           <div className="f4h-fade-in" style={{ marginTop: 18, borderTop: "1px solid var(--border-soft)", paddingTop: 16 }}>
@@ -6264,7 +6320,7 @@ function TrialImportPanel({ data, updateData, showToast }) {
             </div>
             {!mappingValid && (
               <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginBottom: 10 }}>
-                <AlertTriangle size={14} /> 店舗・使用チケット・受講日は必須項目です
+                <AlertTriangle size={14} /> 必須列が不足しています: {missingRequiredHeaders.join("・")}。既存の体験者データは変更していません。
               </div>
             )}
             {mappingValid && (
@@ -6277,6 +6333,11 @@ function TrialImportPanel({ data, updateData, showToast }) {
                   <span>重複スキップ <b className="num" style={{ color: "var(--ink-faint)" }}>{dedup.skipped}</b>件</span>
                   <span>分析対象 <b className="num">{displayTrials.length}</b>件</span>
                 </div>
+                {cleaned.length === 0 && (
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--amber)", fontSize: 12.5, marginBottom: 10 }}>
+                    <Info size={14} /> 無料体験チケットに該当する行が0件でした。既存の体験者データは変更していません。
+                  </div>
+                )}
                 <div className="scrollbar-thin" style={{ maxHeight: 220, overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8, marginBottom: 12 }}>
                   <table className="f4h-table">
                     <thead><tr><th>店舗</th><th>受講日</th><th>メンバーID</th><th>氏名</th><th>状態</th></tr></thead>
@@ -6292,7 +6353,7 @@ function TrialImportPanel({ data, updateData, showToast }) {
                     </tbody>
                   </table>
                 </div>
-                <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "9px 18px" }} onClick={handleImport} disabled={!dedup.accepted.length}>
+                <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "9px 18px" }} onClick={handleImport} disabled={!cleaned.length || !dedup.accepted.length}>
                   <Check size={15} /> {dedup.accepted.length}件を取り込む
                 </button>
               </>
@@ -6437,7 +6498,6 @@ function JoinImportPanel({ data, updateData, showToast }) {
   const [visibleCount, setVisibleCount] = useState(40);
   const [importSourceName, setImportSourceName] = useState("貼り付けCSV");
   const [counselingSyncWarning, setCounselingSyncWarning] = useState("");
-  const [parseError, setParseError] = useState("");
   const fileRef = useRef(null);
 
   const doParse = useCallback((text) => {
@@ -6446,27 +6506,13 @@ function JoinImportPanel({ data, updateData, showToast }) {
       header: true, skipEmptyLines: true,
       complete: (res) => {
         const hdrs = res.meta.fields || [];
-        if (!hdrs.length || res.errors?.length) {
-          const detail = res.errors?.[0]?.message;
-          setRawRows(null);
-          setHeaders([]);
-          setMapping(null);
-          setParseError(detail ? `CSVの解析に失敗しました: ${detail}` : "CSVヘッダーを読み取れませんでした。");
-          return;
-        }
         setHeaders(hdrs);
         setRawRows(res.data);
         setMapping(suggestMapping(hdrs, REQUIRED_JOIN_FIELDS));
-        setParseError("");
       },
-      error: () => {
-        setRawRows(null);
-        setHeaders([]);
-        setMapping(null);
-        setParseError("CSVの解析に失敗しました。");
-      },
+      error: () => showToast("CSVの解析に失敗しました。", true),
     });
-  }, []);
+  }, [showToast]);
 
   const onFile = useCallback((e) => {
     const f = e.target.files?.[0];
@@ -6477,10 +6523,9 @@ function JoinImportPanel({ data, updateData, showToast }) {
       setCsvText(text);
       setImportSourceName(f.name || "入会者データCSV");
       setCounselingSyncWarning("");
-      setParseError("");
       doParse(text);
     };
-    reader.onerror = () => setParseError("ファイルの読み込みに失敗しました。");
+    reader.onerror = () => showToast("ファイルの読み込みに失敗しました。", true);
     reader.readAsText(f, "UTF-8");
   }, [doParse, showToast]);
 
@@ -6488,7 +6533,6 @@ function JoinImportPanel({ data, updateData, showToast }) {
     if (csvText.trim()) {
       setImportSourceName("貼り付けCSV");
       setCounselingSyncWarning("");
-      setParseError("");
       doParse(csvText);
     }
   }, [csvText, doParse]);
@@ -6504,16 +6548,11 @@ function JoinImportPanel({ data, updateData, showToast }) {
     return buildCounselingNewMembersFromJoinCsv(rawRows, importSourceName);
   }, [rawRows, importSourceName]);
   const mappingValid = mapping && mapping.memberId && mapping.effectiveDate;
-  const missingRequiredHeaders = mapping ? REQUIRED_JOIN_FIELDS.filter((field) => !mapping[field.key]).map((field) => field.label) : [];
   const counselingImportableCount = counselingImport?.rows?.length || 0;
 
   const handleImport = async () => {
-    if (!mappingValid) {
-      showToast(`必須列が不足しています: ${missingRequiredHeaders.join("・")}`, true);
-      return;
-    }
-    if (!cleaned.length) {
-      showToast("有効な入会者データが0件のため、既存データは変更していません。メンバーIDと入会月判定日の列を確認してください。", true);
+    if (!dedup.accepted.length && !counselingImportableCount) {
+      showToast("取り込める新規データがありません。", true);
       return;
     }
     if (dedup.accepted.length) {
@@ -6600,15 +6639,10 @@ function JoinImportPanel({ data, updateData, showToast }) {
           <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "8px 16px" }} onClick={onParseText} disabled={!csvText.trim()}>読み込む</button>
           <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }}
             disabled={!csvText && !rawRows}
-            onClick={() => { setCsvText(""); setRawRows(null); setHeaders([]); setMapping(null); setImportSourceName("貼り付けCSV"); setCounselingSyncWarning(""); setParseError(""); if (fileRef.current) fileRef.current.value = ""; }}>
+            onClick={() => { setCsvText(""); setRawRows(null); setHeaders([]); setMapping(null); setImportSourceName("貼り付けCSV"); setCounselingSyncWarning(""); if (fileRef.current) fileRef.current.value = ""; }}>
             <X size={13} /> リセット
           </button>
         </div>
-        {parseError && (
-          <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginTop: 10 }}>
-            <AlertTriangle size={14} /> {parseError} 既存の入会者データは変更していません。
-          </div>
-        )}
         {counselingSyncWarning && (
           <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginTop: 10 }}>
             <AlertTriangle size={14} /> {counselingSyncWarning}
@@ -6625,7 +6659,7 @@ function JoinImportPanel({ data, updateData, showToast }) {
             </div>
             {!mappingValid && (
               <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--red)", fontSize: 12.5, marginBottom: 10 }}>
-                <AlertTriangle size={14} /> 必須列が不足しています: {missingRequiredHeaders.join("・")}。入会月判定日はプラン契約適用開始日、入会日時、無料体験会受講日時、トライアル初回受講日時、受講日の順に検出します。
+                <AlertTriangle size={14} /> メンバーID・プラン契約適用開始日は必須項目です
               </div>
             )}
             {mappingValid && (
@@ -6649,7 +6683,7 @@ function JoinImportPanel({ data, updateData, showToast }) {
                     </tbody>
                   </table>
                 </div>
-                <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "9px 18px" }} onClick={handleImport} disabled={!cleaned.length}>
+                <button className="f4h-btn f4h-btn-primary f4h-focus" style={{ padding: "9px 18px" }} onClick={handleImport} disabled={!dedup.accepted.length && !counselingImportableCount}>
                   <Check size={15} /> 取り込む
                 </button>
               </>
