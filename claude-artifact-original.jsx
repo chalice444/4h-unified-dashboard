@@ -8998,6 +8998,93 @@ function usageSignedDaysBetween(startStr, endStr) {
   if (!start || !end) return null;
   return Math.round((end.getTime() - start.getTime()) / 86400000);
 }
+function usageCancelMonthBounds(month) {
+  if (!/^\d{4}-\d{2}$/.test(month || "")) return null;
+  const year = Number(month.slice(0, 4));
+  const monthIndex = Number(month.slice(5, 7)) - 1;
+  const lastDay = new Date(year, monthIndex + 1, 0).getDate();
+  return { start: `${month}-01`, end: `${month}-${String(lastDay).padStart(2, "0")}` };
+}
+function usageCancelShiftMonth(month, offset) {
+  const bounds = usageCancelMonthBounds(month);
+  if (!bounds) return "";
+  const year = Number(month.slice(0, 4));
+  const monthIndex = Number(month.slice(5, 7)) - 1 + offset;
+  const date = new Date(year, monthIndex, 1);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+function usageCancelMonthLabel(month) {
+  if (!/^\d{4}-\d{2}$/.test(month || "")) return "—";
+  return `${month.slice(0, 4)}年${Number(month.slice(5, 7))}月`;
+}
+function usageCancelPeriod(mode, customStartMonth, customEndMonth) {
+  const today = todayIsoLocal();
+  const currentMonth = today.slice(0, 7);
+  const previousMonth = usageCancelShiftMonth(currentMonth, -1);
+  if (mode === "current") {
+    return { mode, start: `${currentMonth}-01`, end: today, startMonth: currentMonth, endMonth: currentMonth, label: `${usageCancelMonthLabel(currentMonth)}（月途中）`, includesCurrentMonth: true };
+  }
+  if (mode === "previous") {
+    const bounds = usageCancelMonthBounds(previousMonth);
+    return { mode, ...bounds, startMonth: previousMonth, endMonth: previousMonth, label: usageCancelMonthLabel(previousMonth), includesCurrentMonth: false };
+  }
+  if (mode === "last3" || mode === "last6") {
+    const months = mode === "last3" ? 3 : 6;
+    const startMonth = usageCancelShiftMonth(currentMonth, -(months - 1));
+    return { mode, start: `${startMonth}-01`, end: today, startMonth, endMonth: currentMonth, label: `${usageCancelMonthLabel(startMonth)}〜${usageCancelMonthLabel(currentMonth)}（月途中）`, includesCurrentMonth: true };
+  }
+  if (mode === "custom") {
+    const rawStart = customStartMonth || customEndMonth;
+    const rawEnd = customEndMonth || customStartMonth;
+    if (!rawStart || !rawEnd) return { mode, start: null, end: null, startMonth: null, endMonth: null, label: "期間指定（未指定）", includesCurrentMonth: false };
+    const [startMonth, endMonth] = rawStart <= rawEnd ? [rawStart, rawEnd] : [rawEnd, rawStart];
+    const endBounds = usageCancelMonthBounds(endMonth);
+    return { mode, start: `${startMonth}-01`, end: endBounds?.end || null, startMonth, endMonth, label: startMonth === endMonth ? usageCancelMonthLabel(startMonth) : `${usageCancelMonthLabel(startMonth)}〜${usageCancelMonthLabel(endMonth)}`, includesCurrentMonth: currentMonth >= startMonth && currentMonth <= endMonth };
+  }
+  return { mode: "all", start: null, end: null, startMonth: null, endMonth: null, label: "全期間", includesCurrentMonth: false };
+}
+function usageCancelRowInPeriod(row, period) {
+  if (period.mode === "all") return true;
+  const cancelDate = parseFlexibleDate(row.cancelDate);
+  return !!cancelDate && !!period.start && !!period.end && cancelDate >= period.start && cancelDate <= period.end;
+}
+function usageCancelLastUseSummary(rows) {
+  const matched = rows.filter((row) => row.matched);
+  const unmatched = rows.filter((row) => !row.matched);
+  const withLastLogin = rows.filter((row) => row.matched && row.lastLogin);
+  const noLastLogin = rows.filter((row) => row.matched && !row.lastLogin);
+  const noCancelDate = rows.filter((row) => !row.cancelDate);
+  const afterCancel = rows.filter((row) => row.lastLoginGapDays != null && row.lastLoginGapDays < 0);
+  const validGapRows = rows.filter((row) => row.lastLoginGapDays != null && row.lastLoginGapDays >= 0);
+  const within7 = validGapRows.filter((row) => row.lastLoginGapDays <= 7);
+  const from8To14 = validGapRows.filter((row) => row.lastLoginGapDays >= 8 && row.lastLoginGapDays <= 14);
+  const between15And29 = validGapRows.filter((row) => row.lastLoginGapDays >= 15 && row.lastLoginGapDays <= 29);
+  const from30To59 = validGapRows.filter((row) => row.lastLoginGapDays >= 30 && row.lastLoginGapDays <= 59);
+  const from60To89 = validGapRows.filter((row) => row.lastLoginGapDays >= 60 && row.lastLoginGapDays <= 89);
+  const over90 = validGapRows.filter((row) => row.lastLoginGapDays >= 90);
+  const over30 = validGapRows.filter((row) => row.lastLoginGapDays >= 30);
+  const over60 = validGapRows.filter((row) => row.lastLoginGapDays >= 60);
+  const gapValues = validGapRows.map((row) => row.lastLoginGapDays);
+  return {
+    matched, unmatched, withLastLogin, noLastLogin, noCancelDate, afterCancel, validGapRows,
+    within7, from8To14, between15And29, from30To59, from60To89, over30, over60, over90,
+    avgGap: gapValues.length ? gapValues.reduce((sum, value) => sum + value, 0) / gapValues.length : null,
+    medianGap: medianOf(gapValues),
+  };
+}
+function usageCancelMonthlySummaries(rows) {
+  const rowsByMonth = new Map();
+  rows.forEach((row) => {
+    const month = monthOfIsoDate(parseFlexibleDate(row.cancelDate));
+    if (!month) return;
+    if (!rowsByMonth.has(month)) rowsByMonth.set(month, []);
+    rowsByMonth.get(month).push(row);
+  });
+  return [...rowsByMonth.entries()]
+    .sort(([left], [right]) => right.localeCompare(left))
+    .slice(0, 12)
+    .map(([month, monthRows]) => ({ month, rows: monthRows, summary: usageCancelLastUseSummary(monthRows) }));
+}
 function usageCounts(rows) {
   return {
     zero: rows.filter((row) => row.trLast30d === 0).length,
@@ -9440,64 +9527,126 @@ function UsageCancelLastUseTable({ rows, limit = USAGE_INITIAL_VISIBLE_LIMIT, on
   );
 }
 function UsageCancelLastUseTab({ usage }) {
-  const rows = usage.cancelRows;
-  const matched = rows.filter((row) => row.matched);
-  const unmatched = rows.filter((row) => !row.matched);
-  const withLastLogin = rows.filter((row) => row.matched && row.lastLogin);
-  const noLastLogin = rows.filter((row) => row.matched && !row.lastLogin);
-  const noCancelDate = rows.filter((row) => !row.cancelDate);
-  const afterCancel = rows.filter((row) => row.lastLoginGapDays != null && row.lastLoginGapDays < 0);
-  const validGapRows = rows.filter((row) => row.lastLoginGapDays != null && row.lastLoginGapDays >= 0);
-  const within7 = validGapRows.filter((row) => row.lastLoginGapDays <= 7);
-  const within14 = validGapRows.filter((row) => row.lastLoginGapDays <= 14);
-  const between15And29 = validGapRows.filter((row) => row.lastLoginGapDays >= 15 && row.lastLoginGapDays <= 29);
-  const over30 = validGapRows.filter((row) => row.lastLoginGapDays >= 30);
-  const over60 = validGapRows.filter((row) => row.lastLoginGapDays >= 60);
-  const over90 = validGapRows.filter((row) => row.lastLoginGapDays >= 90);
-  const gapValues = validGapRows.map((row) => row.lastLoginGapDays);
-  const avgGap = gapValues.length ? gapValues.reduce((sum, value) => sum + value, 0) / gapValues.length : null;
-  const medianGap = medianOf(gapValues);
+  const [periodMode, setPeriodMode] = useState("all");
+  const [customStartMonth, setCustomStartMonth] = useState("");
+  const [customEndMonth, setCustomEndMonth] = useState("");
   const [riskFilter, setRiskFilter] = useState("all");
   const [sortKey, setSortKey] = useState("gapDesc");
   const [visibleLimit, setVisibleLimit] = useState(USAGE_INITIAL_VISIBLE_LIMIT);
+  const period = usageCancelPeriod(periodMode, customStartMonth, customEndMonth);
+  const rows = usage.cancelRows.filter((row) => usageCancelRowInPeriod(row, period));
+  const summary = usageCancelLastUseSummary(rows);
+  const monthlySummaries = usageCancelMonthlySummaries(rows);
+  const canShowMonthlyComparison = period.mode === "all" || period.mode === "last3" || period.mode === "last6" || (period.mode === "custom" && period.startMonth && period.endMonth && period.startMonth !== period.endMonth);
+  const validGapRatio = (count) => pct1(summary.validGapRows.length ? count / summary.validGapRows.length : null);
+  const selectionRatio = (count) => pct1(rows.length ? count / rows.length : null);
+  const selectPeriodMode = (mode) => {
+    setPeriodMode(mode);
+    if (mode === "custom" && !customStartMonth && !customEndMonth) {
+      const currentMonth = todayIsoLocal().slice(0, 7);
+      setCustomStartMonth(currentMonth);
+      setCustomEndMonth(currentMonth);
+    }
+    setVisibleLimit(USAGE_INITIAL_VISIBLE_LIMIT);
+  };
   const riskFilterOptions = [
     { key: "all", label: "全件", count: rows.length },
-    { key: "used", label: "退会直前まで利用", count: within7.length },
-    { key: "low", label: "退会前に利用低下", count: between15And29.length },
-    { key: "dormant", label: "休眠後退会", count: over30.length },
-    { key: "longDormant", label: "長期休眠後退会", count: over60.length },
-    { key: "noLastLogin", label: "LASTLOGINなし", count: noLastLogin.length },
-    { key: "afterCancel", label: "退会日後LASTLOGIN", count: afterCancel.length },
+    { key: "used", label: "退会直前まで利用", count: summary.within7.length },
+    { key: "low", label: "退会前に利用低下", count: summary.between15And29.length },
+    { key: "dormant", label: "休眠後退会", count: summary.over30.length },
+    { key: "longDormant", label: "長期休眠後退会", count: summary.over60.length },
+    { key: "noLastLogin", label: "LASTLOGINなし", count: summary.noLastLogin.length },
+    { key: "afterCancel", label: "退会日後LASTLOGIN", count: summary.afterCancel.length },
   ];
-  const tableRows = riskFilter === "used" ? within7
-    : riskFilter === "low" ? between15And29
-    : riskFilter === "dormant" ? over30
-    : riskFilter === "longDormant" ? over60
-    : riskFilter === "noLastLogin" ? noLastLogin
-    : riskFilter === "afterCancel" ? afterCancel
+  const tableRows = riskFilter === "used" ? summary.within7
+    : riskFilter === "low" ? summary.between15And29
+    : riskFilter === "dormant" ? summary.over30
+    : riskFilter === "longDormant" ? summary.over60
+    : riskFilter === "noLastLogin" ? summary.noLastLogin
+    : riskFilter === "afterCancel" ? summary.afterCancel
     : rows;
   const sortedTableRows = sortUsageRows(tableRows, sortKey, usageCancelLastUseLabel);
   return (
     <div style={{ display: "grid", gap: 16 }}>
       <div className="f4h-card" style={{ padding: 14, background: "var(--surface-soft)", fontSize: 12.5, color: "var(--ink-soft)", lineHeight: 1.7 }}>
-        この分析は、選択中snapshotDateのミロンME利用サマリーに残っているLASTLOGINと退会者CSVの退会日を照合し、最終利用日から退会日までの空白期間を集計しています。TR_LAST30Dはデータ基準日時点の直近30日利用回数であり、退会前30日利用回数ではありません。退会前30日・60日・90日の正確な利用回数や月別推移は、このデータだけでは算出できません。
+        この分析は、選択中snapshotDateのミロンME利用サマリーに残っているLASTLOGINと退会者CSVの退会日を照合し、最終利用日から退会日までの空白期間を集計しています。退会期間フィルターは退会日を基準にし、snapshotDateはミロンME照合元の選択にのみ使用します。TR_LAST30Dはデータ基準日時点の直近30日利用回数であり、退会前30日利用回数ではありません。退会前30日・60日・90日の正確な利用回数や月別推移は、このデータだけでは算出できません。
+      </div>
+      <div className="f4h-card" style={{ padding: 14, display: "grid", gap: 10 }}>
+        <div style={{ fontSize: 12.5, color: "var(--ink-soft)", fontWeight: 700 }}>退会期間フィルター（退会日基準）</div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          {[
+            ["all", "全期間"], ["current", "当月"], ["previous", "前月"], ["last3", "直近3ヶ月"], ["last6", "直近6ヶ月"], ["custom", "期間指定"],
+          ].map(([key, label]) => <Pill key={key} active={periodMode === key} onClick={() => selectPeriodMode(key)}>{label}</Pill>)}
+        </div>
+        {periodMode === "custom" && <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "end" }}>
+          <label style={{ fontSize: 12, color: "var(--ink-soft)", fontWeight: 700 }}>開始月
+            <input className="f4h-input" type="month" style={{ display: "block", marginTop: 4 }} value={customStartMonth} onChange={(event) => { setCustomStartMonth(event.target.value); setVisibleLimit(USAGE_INITIAL_VISIBLE_LIMIT); }} />
+          </label>
+          <label style={{ fontSize: 12, color: "var(--ink-soft)", fontWeight: 700 }}>終了月
+            <input className="f4h-input" type="month" style={{ display: "block", marginTop: 4 }} value={customEndMonth} onChange={(event) => { setCustomEndMonth(event.target.value); setVisibleLimit(USAGE_INITIAL_VISIBLE_LIMIT); }} />
+          </label>
+        </div>}
+        <div style={{ fontSize: 12.3, color: "var(--ink-faint)", lineHeight: 1.6 }}>対象: {period.label} / {usage.storeFilter === "all" ? "全店" : usage.storeFilter}{period.includesCurrentMonth ? "。当月分は月途中の集計です。" : ""}</div>
       </div>
       <div className="f4h-kpi-grid">
         <UsageKpiCard label="退会者数" value={`${num(rows.length)}人`} />
-        <UsageKpiCard label="ミロンME照合済み退会者数" value={`${num(matched.length)}人`} tone="blue" />
-        <UsageKpiCard label="ミロンME未照合退会者数" value={`${num(unmatched.length)}人`} />
-        <UsageKpiCard label="LASTLOGINあり退会者数" value={`${num(withLastLogin.length)}人`} />
-        <UsageKpiCard label="LASTLOGINなし退会者数" value={`${num(noLastLogin.length)}人`} />
-        <UsageKpiCard label="最終利用から退会まで7日以内" value={`${num(within7.length)}人`} />
-        <UsageKpiCard label="最終利用から退会まで14日以内" value={`${num(within14.length)}人`} />
-        <UsageKpiCard label="最終利用から退会まで15〜29日" value={`${num(between15And29.length)}人`} tone="amber" />
-        <UsageKpiCard label="最終利用から退会まで30日以上" value={`${num(over30.length)}人`} tone="red" />
-        <UsageKpiCard label="最終利用から退会まで60日以上" value={`${num(over60.length)}人`} />
-        <UsageKpiCard label="最終利用から退会まで90日以上" value={`${num(over90.length)}人`} />
-        <UsageKpiCard label="平均空白日数" value={avgGap == null ? "—" : `${Math.round(avgGap * 10) / 10}日`} />
-        <UsageKpiCard label="中央値空白日数" value={medianGap == null ? "—" : `${Math.round(medianGap * 10) / 10}日`} />
-        <UsageKpiCard label="退会日後LASTLOGIN" value={`${num(afterCancel.length)}人`} />
-        <UsageKpiCard label="退会日不明" value={`${num(noCancelDate.length)}人`} />
+        <UsageKpiCard label="ミロンME照合済み退会者数" value={`${num(summary.matched.length)}人`} tone="blue" />
+        <UsageKpiCard label="ミロンME未照合退会者数" value={`${num(summary.unmatched.length)}人`} />
+        <UsageKpiCard label="LASTLOGINあり退会者数" value={`${num(summary.withLastLogin.length)}人`} />
+        <UsageKpiCard label="LASTLOGINなし退会者数" value={`${num(summary.noLastLogin.length)}人`} />
+        <UsageKpiCard label="空白日数算出可能退会者数" value={`${num(summary.validGapRows.length)}人`} />
+        <UsageKpiCard label="平均空白日数" value={summary.avgGap == null ? "—" : `${Math.round(summary.avgGap * 10) / 10}日`} />
+        <UsageKpiCard label="中央値空白日数" value={summary.medianGap == null ? "—" : `${Math.round(summary.medianGap * 10) / 10}日`} />
+        <UsageKpiCard label="30日以上空白" value={`${num(summary.over30.length)}人`} sub={`算出可能者の${validGapRatio(summary.over30.length)}`} tone="red" />
+        <UsageKpiCard label="60日以上空白" value={`${num(summary.over60.length)}人`} sub={`算出可能者の${validGapRatio(summary.over60.length)}`} />
+        <UsageKpiCard label="90日以上空白" value={`${num(summary.over90.length)}人`} sub={`算出可能者の${validGapRatio(summary.over90.length)}`} />
+        <UsageKpiCard label="退会日後LASTLOGIN" value={`${num(summary.afterCancel.length)}人`} />
+        <UsageKpiCard label="退会日不明" value={`${num(summary.noCancelDate.length)}人`} />
+      </div>
+      <div className="f4h-card" style={{ padding: 14, display: "grid", gap: 10 }}>
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 800 }}>最終利用から退会までの空白日数分布</div>
+          <div style={{ marginTop: 4, fontSize: 12, color: "var(--ink-faint)" }}>算出可能退会者のみを排他分類しています。ミロンME未照合退会者は空白日数の算出対象外です。</div>
+        </div>
+        <div className="scrollbar-thin" style={{ overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8 }}>
+          <table className="f4h-table">
+            <thead><tr><th>区分</th><th>人数</th><th>構成比</th></tr></thead>
+            <tbody>
+              {[
+                ["7日以内", summary.within7.length], ["8〜14日", summary.from8To14.length], ["15〜29日", summary.between15And29.length], ["30〜59日", summary.from30To59.length], ["60〜89日", summary.from60To89.length], ["90日以上", summary.over90.length],
+              ].map(([label, count]) => <tr key={label}><td style={{ textAlign: "left" }}>{label}</td><td className="num">{num(count)}人</td><td className="num">{validGapRatio(count)}</td></tr>)}
+              <tr><td style={{ textAlign: "left" }}>LASTLOGINなし</td><td className="num">{num(summary.noLastLogin.length)}人</td><td className="num">参考: {selectionRatio(summary.noLastLogin.length)}</td></tr>
+              <tr><td style={{ textAlign: "left" }}>退会日後LASTLOGIN</td><td className="num">{num(summary.afterCancel.length)}人</td><td className="num">参考: {selectionRatio(summary.afterCancel.length)}</td></tr>
+              <tr><td style={{ textAlign: "left" }}>退会日不明</td><td className="num">{num(summary.noCancelDate.length)}人</td><td className="num">参考: {selectionRatio(summary.noCancelDate.length)}</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {canShowMonthlyComparison ? <div className="f4h-card" style={{ padding: 14, display: "grid", gap: 10 }}>
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 800 }}>月別比較</div>
+          <div style={{ marginTop: 4, fontSize: 12, color: "var(--ink-faint)" }}>{period.mode === "all" ? "全期間選択時は、上部KPIは全期間、月別比較は直近12ヶ月を表示します。" : "選択期間内の月別集計です。"}</div>
+        </div>
+        <div className="scrollbar-thin" style={{ overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8 }}>
+          <table className="f4h-table">
+            <thead><tr><th>退会月</th><th>退会者数</th><th>空白日数算出可能</th><th>平均空白日数</th><th>中央値空白日数</th><th>30日以上</th><th>60日以上</th><th>90日以上</th><th>LASTLOGINなし</th><th>退会日後LASTLOGIN</th></tr></thead>
+            <tbody>
+              {monthlySummaries.map(({ month, rows: monthRows, summary: monthSummary }) => {
+                const ratio = (count) => pct1(monthSummary.validGapRows.length ? count / monthSummary.validGapRows.length : null);
+                return <tr key={month}>
+                  <td>{month}</td><td className="num">{num(monthRows.length)}人</td><td className="num">{num(monthSummary.validGapRows.length)}人</td>
+                  <td className="num">{monthSummary.avgGap == null ? "—" : `${Math.round(monthSummary.avgGap * 10) / 10}日`}</td><td className="num">{monthSummary.medianGap == null ? "—" : `${Math.round(monthSummary.medianGap * 10) / 10}日`}</td>
+                  <td className="num">{num(monthSummary.over30.length)}人 / {ratio(monthSummary.over30.length)}</td><td className="num">{num(monthSummary.over60.length)}人 / {ratio(monthSummary.over60.length)}</td><td className="num">{num(monthSummary.over90.length)}人 / {ratio(monthSummary.over90.length)}</td>
+                  <td className="num">{num(monthSummary.noLastLogin.length)}人</td><td className="num">{num(monthSummary.afterCancel.length)}人</td>
+                </tr>;
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div> : <div className="f4h-card" style={{ padding: 14, fontSize: 12.3, color: "var(--ink-faint)" }}>月別比較は、全期間・直近3ヶ月・直近6ヶ月、または複数月を指定した期間指定で表示します。</div>}
+      <div style={{ display: "grid", gap: 8 }}>
+        <div style={{ fontSize: 14, fontWeight: 800 }}>退会者個別一覧</div>
+        <div style={{ fontSize: 12, color: "var(--ink-faint)" }}>退会期間フィルターと店舗フィルターを反映し、既存の分類・並び替え・表示件数操作を維持しています。</div>
       </div>
       <UsageRiskFilter options={riskFilterOptions} active={riskFilter} onChange={(value) => { setRiskFilter(value); setVisibleLimit(USAGE_INITIAL_VISIBLE_LIMIT); }} sortOptions={USAGE_CANCEL_SORT_OPTIONS} sortKey={sortKey} onSortChange={(value) => { setSortKey(value); setVisibleLimit(USAGE_INITIAL_VISIBLE_LIMIT); }} />
       <UsageCancelLastUseTable rows={sortedTableRows} limit={visibleLimit} onShowMore={() => setVisibleLimit((limit) => limit + USAGE_INITIAL_VISIBLE_LIMIT)} onShowAll={() => setVisibleLimit(sortedTableRows.length)} onReset={() => setVisibleLimit(USAGE_INITIAL_VISIBLE_LIMIT)} />
@@ -9513,7 +9662,7 @@ function UsageAnalysisView({ data }) {
   useEffect(() => {
     if (!snapshotDate && latest) setSnapshotDate(latest);
   }, [snapshotDate, latest]);
-  const usage = useMemo(() => ({ ...usageBuildRows(data, snapshotDate || latest, storeFilter), snapshotDate: snapshotDate || latest }), [data, snapshotDate, latest, storeFilter]);
+  const usage = useMemo(() => ({ ...usageBuildRows(data, snapshotDate || latest, storeFilter), snapshotDate: snapshotDate || latest, storeFilter }), [data, snapshotDate, latest, storeFilter]);
   if (!snapshots.length) return <EmptyState icon={Clock} title="ミロンME利用サマリーが未取り込みです" sub="データ入力 > ミロンME利用サマリー からExcelを取り込んでください。" />;
   return (
     <div className="f4h-fade-in" style={{ display: "grid", gap: 16 }}>
@@ -9545,7 +9694,7 @@ function UsageAnalysisView({ data }) {
       {tab === "initial" && <UsageInitialRetentionTab key={`initial-${snapshotDate || latest}-${storeFilter}`} usage={usage} />}
       {tab === "mid" && <UsageMidRetentionTab key={`mid-${snapshotDate || latest}-${storeFilter}`} usage={usage} />}
       {tab === "dormant" && <UsageDormantTab key={`dormant-${snapshotDate || latest}-${storeFilter}`} usage={usage} />}
-      {tab === "cancelLastUse" && <UsageCancelLastUseTab key={`cancelLastUse-${snapshotDate || latest}-${storeFilter}`} usage={usage} />}
+      {tab === "cancelLastUse" && <UsageCancelLastUseTab usage={usage} />}
     </div>
   );
 }
