@@ -10940,6 +10940,7 @@ function CvrAnalysisView({ data }) {
 const COMPARE_METRICS = [
   { key: "revenue", label: "売上", unit: "", fmt: yen, invert: false },
   { key: "members", label: "会員数", unit: "人", fmt: num, invert: false },
+  { key: "trials", label: "体験数", unit: "件", fmt: num, invert: false },
   { key: "joins", label: "入会数", unit: "人", fmt: num, invert: false },
   { key: "leaves", label: "退会数", unit: "人", fmt: num, invert: true },
   { key: "net", label: "純増数", unit: "人", fmt: num, invert: false },
@@ -10947,13 +10948,17 @@ const COMPARE_METRICS = [
 ];
 
 function metricValue(data, metricKey, storeArg, year, month) {
-  const { memberMonthly, baselines, budgetTargets, revenueActuals, settings } = data;
+  const { memberMonthly, baselines, budgetTargets, revenueActuals, settings, trials } = data;
   const mm = getStoreOrAllMemberMonthly(memberMonthly, storeArg, year, month);
   const budget = getBudgetForStore(budgetTargets, storeArg, year, month, settings.targetCvrPct);
   const prior = getPriorMonthTotal(memberMonthly, baselines, storeArg, year, month);
   switch (metricKey) {
     case "revenue": return { actual: getRevenueActual(revenueActuals, storeArg, year, month), target: budget?.revenue ?? null };
     case "members": return { actual: mm?.total ?? null, target: budget?.members ?? null };
+    case "trials": {
+      const actual = aggregateTrialPeriod(trials, { store: storeArg, months: [{ year, month }] }).trialCount;
+      return { actual, target: budget ? deriveTrialTarget(budget.joins, settings.targetCvrPct) : null };
+    }
     case "joins": return { actual: mm?.joinsTotal ?? null, target: budget?.joins ?? null };
     case "leaves": return { actual: mm?.leaves ?? null, target: budget?.leaves ?? null };
     case "net": return { actual: netIncreaseOf(mm?.joinsTotal, mm?.leaves), target: budget?.netIncrease ?? null };
