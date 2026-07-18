@@ -369,7 +369,31 @@ function suggestTrialMapping(headers) {
   return mapping;
 }
 function isFreeTrialTicket(ticketRaw) {
-  return String(ticketRaw || "").includes("無料体験チケット");
+  const ticket = String(ticketRaw || "").normalize("NFKC").trim();
+  return ticket.includes("無料体験") || ticket.includes("トライアル");
+}
+function trialCsvRowValue(row, names) {
+  const header = resolveTrialCsvHeader(Object.keys(row || {}), names);
+  return header ? row[header] : "";
+}
+function isLegacyFreeTrialRow(row) {
+  const programName = String(trialCsvRowValue(row, ["プログラム名", "クラス名", "レッスン名", "programName", "program_name"]) || "").normalize("NFKC").trim();
+  const bookingMethod = String(trialCsvRowValue(row, ["予約方法", "予約種別", "bookingMethod", "booking_method"]) || "").normalize("NFKC").trim();
+  const reservationCategory = String(trialCsvRowValue(row, ["店舗予約カテゴリ", "予約カテゴリ", "reservationCategory", "reservation_category"]) || "").normalize("NFKC").trim();
+
+  if (
+    programName.includes("カウンセリング") ||
+    programName.includes("スタジオ") ||
+    programName.includes("ストレッチポール") ||
+    bookingMethod.includes("カウンセリング")
+  ) return false;
+  if (programName.includes("無料体験")) return true;
+  if (bookingMethod.includes("無料体験予約") || bookingMethod.includes("無料体験")) return true;
+  return normalizedCsvHeaderName(reservationCategory) === normalizedCsvHeaderName("無料体験");
+}
+function freeTrialCandidateRows(rawRows, mapping) {
+  const ticketMatches = (rawRows || []).filter((row) => isFreeTrialTicket(mapping.ticket ? row[mapping.ticket] : ""));
+  return ticketMatches.length > 0 ? ticketMatches : (rawRows || []).filter(isLegacyFreeTrialRow);
 }
 function stableImportKey(parts) {
   return parts.map((part) => String(part ?? "").trim()).join("__");
@@ -524,9 +548,8 @@ function cleanJoinCsvRows(rawRows, mapping) {
 // 生CSV行 + マッピング -> クレンジング済みtrial候補（store正規化・無料体験のみ）
 function cleanCsvRows(rawRows, mapping) {
   const out = [];
-  for (const row of rawRows) {
+  for (const row of freeTrialCandidateRows(rawRows, mapping)) {
     const ticketRaw = mapping.ticket ? row[mapping.ticket] : "";
-    if (!isFreeTrialTicket(ticketRaw)) continue;
     const storeRaw = mapping.store ? row[mapping.store] : "";
     const store = matchStoreName(storeRaw);
     const lessonDate = mapping.lessonDate ? parseFlexibleDate(row[mapping.lessonDate]) : null;
@@ -6187,7 +6210,7 @@ function TrialImportPanel({ data, updateData, showToast }) {
       return;
     }
     if (!cleaned.length) {
-      showToast("無料体験チケットに該当する行が0件でした。既存の体験者データは変更していません。", true);
+      showToast("無料体験に該当する行が0件でした。既存の体験者データは変更していません。", true);
       return;
     }
     if (!dedup.accepted.length) { showToast("取り込める新規データがありません。", true); return; }
@@ -6282,7 +6305,7 @@ function TrialImportPanel({ data, updateData, showToast }) {
           <Upload size={16} /><div style={{ fontWeight: 700, fontSize: 14 }}>hacomonoの予約一覧CSVを取り込む</div>
         </div>
         <p style={{ fontSize: 12.5, color: "var(--ink-faint)", margin: "2px 0 14px" }}>
-          hacomono「データ集計＞予約＞自由枠：予約一覧」でエクスポートしたCSVをそのまま貼り付けるか、ファイルを選択してください。無料体験チケットの行だけ自動で抽出し、店舗表記のゆれ（4H/5H誤記など）も自動修正、既存データとの重複もスキップします。
+          hacomono「データ集計＞予約＞自由枠：予約一覧」でエクスポートしたCSVをそのまま貼り付けるか、ファイルを選択してください。使用チケットを優先して無料体験を抽出し、旧CSVで該当がない場合だけプログラム名・予約方法・予約カテゴリで補完します。店舗表記のゆれ（4H/5H誤記など）も自動修正、既存データとの重複もスキップします。
         </p>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
           <button className="f4h-btn f4h-btn-outline f4h-focus" style={{ padding: "8px 14px" }} onClick={() => fileRef.current?.click()}>
@@ -6335,7 +6358,7 @@ function TrialImportPanel({ data, updateData, showToast }) {
                 </div>
                 {cleaned.length === 0 && (
                   <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--amber)", fontSize: 12.5, marginBottom: 10 }}>
-                    <Info size={14} /> 無料体験チケットに該当する行が0件でした。既存の体験者データは変更していません。
+                    <Info size={14} /> 無料体験に該当する行が0件でした。既存の体験者データは変更していません。
                   </div>
                 )}
                 <div className="scrollbar-thin" style={{ maxHeight: 220, overflow: "auto", border: "1px solid var(--border-soft)", borderRadius: 8, marginBottom: 12 }}>
