@@ -9022,7 +9022,8 @@ function usageCancelPeriod(mode, customStartMonth, customEndMonth) {
   const currentMonth = today.slice(0, 7);
   const previousMonth = usageCancelShiftMonth(currentMonth, -1);
   if (mode === "current") {
-    return { mode, start: `${currentMonth}-01`, end: today, startMonth: currentMonth, endMonth: currentMonth, label: `${usageCancelMonthLabel(currentMonth)}（月途中）`, includesCurrentMonth: true };
+    const bounds = usageCancelMonthBounds(currentMonth);
+    return { mode, ...bounds, startMonth: currentMonth, endMonth: currentMonth, label: `${usageCancelMonthLabel(currentMonth)}（月末退会予定を含む）`, includesCurrentMonth: true, isCurrentMonthSelection: true };
   }
   if (mode === "previous") {
     const bounds = usageCancelMonthBounds(previousMonth);
@@ -9586,7 +9587,7 @@ function UsageCancelLastUseTab({ usage }) {
             <input className="f4h-input" type="month" style={{ display: "block", marginTop: 4 }} value={customEndMonth} onChange={(event) => { setCustomEndMonth(event.target.value); setVisibleLimit(USAGE_INITIAL_VISIBLE_LIMIT); }} />
           </label>
         </div>}
-        <div style={{ fontSize: 12.3, color: "var(--ink-faint)", lineHeight: 1.6 }}>対象: {period.label} / {usage.storeFilter === "all" ? "全店" : usage.storeFilter}{period.includesCurrentMonth ? "。当月分は月途中の集計です。" : ""}</div>
+        <div style={{ fontSize: 12.3, color: "var(--ink-faint)", lineHeight: 1.6 }}>対象: {period.label} / {usage.storeFilter === "all" ? "全店" : usage.storeFilter}{period.isCurrentMonthSelection ? "。当月は今月末までの退会日を対象にしています。月末退会予定を含むため、月末確定値ではありません。月末までの間に退会予定が取り消された場合や、再来店があった場合、表示される人数・空白日数は変動する可能性があります。" : period.includesCurrentMonth ? "。当月分は月途中の集計です。" : ""}</div>
       </div>
       <div className="f4h-kpi-grid">
         <UsageKpiCard label="退会者数" value={`${num(rows.length)}人`} />
