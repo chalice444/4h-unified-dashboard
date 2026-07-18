@@ -9580,12 +9580,24 @@ function UsageCancelLastUseTab({ usage }) {
           ].map(([key, label]) => <Pill key={key} active={periodMode === key} onClick={() => selectPeriodMode(key)}>{label}</Pill>)}
         </div>
         {periodMode === "custom" && <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "end" }}>
-          <label style={{ fontSize: 12, color: "var(--ink-soft)", fontWeight: 700 }}>開始月
-            <input className="f4h-input" type="month" style={{ display: "block", marginTop: 4 }} value={customStartMonth} onChange={(event) => { setCustomStartMonth(event.target.value); setVisibleLimit(USAGE_INITIAL_VISIBLE_LIMIT); }} />
-          </label>
-          <label style={{ fontSize: 12, color: "var(--ink-soft)", fontWeight: 700 }}>終了月
-            <input className="f4h-input" type="month" style={{ display: "block", marginTop: 4 }} value={customEndMonth} onChange={(event) => { setCustomEndMonth(event.target.value); setVisibleLimit(USAGE_INITIAL_VISIBLE_LIMIT); }} />
-          </label>
+          {[
+            { label: "開始月", value: customStartMonth, onChange: setCustomStartMonth },
+            { label: "終了月", value: customEndMonth, onChange: setCustomEndMonth },
+          ].map(({ label, value, onChange }) => {
+            const month = value || todayIsoLocal().slice(0, 7);
+            return <div key={label} style={{ fontSize: 12, color: "var(--ink-soft)", fontWeight: 700 }}>
+              <div style={{ marginBottom: 4 }}>{label}</div>
+              <MonthPicker
+                year={Number(month.slice(0, 4))}
+                month={Number(month.slice(5, 7))}
+                minYear={0}
+                onChange={(year, nextMonth) => {
+                  onChange(`${year}-${String(nextMonth).padStart(2, "0")}`);
+                  setVisibleLimit(USAGE_INITIAL_VISIBLE_LIMIT);
+                }}
+              />
+            </div>;
+          })}
         </div>}
         <div style={{ fontSize: 12.3, color: "var(--ink-faint)", lineHeight: 1.6 }}>対象: {period.label} / {usage.storeFilter === "all" ? "全店" : usage.storeFilter}{period.isCurrentMonthSelection ? "。当月は今月末までの退会日を対象にしています。月末退会予定を含むため、月末確定値ではありません。月末までの間に退会予定が取り消された場合や、再来店があった場合、表示される人数・空白日数は変動する可能性があります。" : period.includesCurrentMonth ? "。当月分は月途中の集計です。" : ""}</div>
       </div>
