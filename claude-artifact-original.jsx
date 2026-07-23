@@ -1147,7 +1147,7 @@ function parseCancellationRows(rawRows) {
     const cancellationMonth = monthOfIsoDate(planEndDate);
     if (cancellationMonth) rawMonthCounts[cancellationMonth] = (rawMonthCounts[cancellationMonth] || 0) + 1;
     if (!memberId || !planEndDate) { skipped++; continue; }
-    const store = matchStoreName(rowValue(row, ["メンバー所属店舗名", "所属店舗名", "店舗名"]));
+    const store = matchStoreName(rowValue(row, ["所属店舗名", "メンバー所属店舗名", "店舗名"]));
     const uniqueKey = `${memberId}__${planEndDate}__${store || ""}`;
     if (seen.has(uniqueKey)) { skipped++; continue; }
     seen.add(uniqueKey);
